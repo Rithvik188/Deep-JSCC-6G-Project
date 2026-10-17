@@ -1,4 +1,5 @@
 import ipaddress
+import socket
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
@@ -7,8 +8,18 @@ from cryptography.hazmat.primitives import serialization
 import datetime
 import sys
 
-def generate_self_signed_cert(ip_address="192.168.0.138"):
-    print(f"Generating self-signed certificate for {ip_address}...")
+def detect_lan_ip():
+    """IP of the interface used for outbound traffic (no packets are actually sent)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+
+
+def generate_self_signed_cert(ip_address=None):
+    """Self-signed cert valid for localhost, 127.0.0.1 and the LAN IP (auto-detected by default).
+    Re-run this whenever the laptop's IP changes, e.g. on a different Wi-Fi network."""
+    ip_address = ip_address or detect_lan_ip()
+    print(f"Generating self-signed certificate for localhost, 127.0.0.1 and {ip_address}...")
     
     # Generate private key
     key = rsa.generate_private_key(
@@ -35,7 +46,11 @@ def generate_self_signed_cert(ip_address="192.168.0.138"):
     ).not_valid_after(
         datetime.datetime.utcnow() + datetime.timedelta(days=365)
     ).add_extension(
-        x509.SubjectAlternativeName([x509.IPAddress(ipaddress.IPv4Address(ip_address))]),
+        x509.SubjectAlternativeName([
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+            x509.IPAddress(ipaddress.IPv4Address(ip_address)),
+        ]),
         critical=False,
     ).sign(key, hashes.SHA256())
     

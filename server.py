@@ -1,16 +1,33 @@
+"""
+server.py
+---------
+Live demo: webcam frames -> Semantic Deep JSCC over a simulated AWGN/Rician/Rayleigh channel,
+shown next to a digital baseline (WebP over a practical channel code) using the SAME number of
+channel symbols, so the digital "cliff effect" is visible live.
+
+Usage:
+  python server.py --checkpoint checkpoints/k1024_best.pth [--port 8001] [--no-fp16]
+"""
+
 import os
 import io
 import math
 import json
+import time
 import base64
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+
 import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 import torchvision.transforms as transforms
 
-from models.jscc_system import DeepJSCCSystem, load_jscc_weights
+from models.jscc_system import build_from_checkpoint
+from baselines.digital import digital_transmit
 
 app = FastAPI(title="Semantic Deep JSCC Backend")
 
@@ -23,9 +40,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variables
+# Set from the command line in __main__ before the app starts
+settings = {'checkpoint': 'checkpoints/best_jscc_model.pth', 'fp16': True}
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = None
+digital_pool = ThreadPoolExecutor(max_workers=1)  # digital baseline runs on CPU alongside the GPU work
+
+CHANNELS = ['awgn', 'rician', 'rayleigh']
+DIGITAL_MODES = {'adaptive': None, 'fixed10': 10.0}  # design SNR for the practical digital link
 
 # Image transforms
 img_size = 128
@@ -35,41 +57,41 @@ to_tensor = transforms.Compose([
 ])
 to_pil = transforms.ToPILImage()
 
+
 @app.on_event("startup")
 async def startup_event():
     global model
     print(f"Loading Semantic JSCC Model on {device}...")
-    model = DeepJSCCSystem(use_vae=True).to(device)
-    model.eval()
-    
-    # Trained transmitter/receiver weights; the VAE keeps its pretrained weights.
-    # Fail loudly rather than silently streaming output from an untrained model.
-    checkpoint_path = 'checkpoints/best_jscc_model.pth'
-    epoch = load_jscc_weights(model, checkpoint_path, device)
-    print(f"Loaded trained weights from {checkpoint_path} (epoch {epoch + 1}).")
+    # Fails loudly rather than silently streaming output from an untrained model
+    model, epoch = build_from_checkpoint(settings['checkpoint'], device, use_vae=True)
+    if settings['fp16'] and device.type == 'cuda':
+        model.vae.half()
+    print(f"Loaded {settings['checkpoint']}: {model.config} (epoch {epoch + 1}), "
+          f"VAE in {'fp16' if settings['fp16'] and device.type == 'cuda' else 'fp32'}.")
+
+
+@app.get("/config")
+async def get_config():
+    return {"num_symbols": model.config['num_symbols'], "checkpoint": os.path.basename(settings['checkpoint'])}
+
 
 @app.websocket("/ws/stream")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("Client connected to video stream.")
-    
+
     try:
         while True:
             # Receive JSON payload from client
             data_str = await websocket.receive_text()
             try:
-                out_data_uri, snr_db = process_frame(json.loads(data_str))
+                reply = process_frame(json.loads(data_str))
             except Exception as e:
                 # A bad frame should not kill the stream; reply so the client keeps looping
                 print(f"Frame error: {e}")
                 await websocket.send_json({"error": str(e)})
                 continue
-
-            # Send back the reconstructed frame
-            await websocket.send_json({
-                "image_reconstructed": out_data_uri,
-                "snr": snr_db
-            })
+            await websocket.send_json(reply)
 
     except WebSocketDisconnect:
         print("Client disconnected.")
@@ -77,8 +99,24 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"WebSocket error: {e}")
 
 
+def to_data_uri(tensor):
+    buffer = io.BytesIO()
+    to_pil(tensor.clamp(0, 1).float().cpu()).save(buffer, format="JPEG", quality=90)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+@torch.no_grad()
+def run_jscc(x, snr_db, channel_type):
+    vae = model.vae
+    dtype = next(vae.parameters()).dtype
+    latents = vae.encode(x.to(dtype)).float()
+    latents_hat = model.forward_latent(latents, snr_db=snr_db, channel_type=channel_type)
+    return vae.decode(latents_hat.to(dtype)).float()
+
+
 def process_frame(data):
-    """Decodes one client frame, runs it through the JSCC pipeline, returns (jpeg data URI, snr)."""
+    """Decodes one client frame, runs JSCC (GPU) and the digital baseline (CPU) in parallel."""
+    t0 = time.time()
     base64_image = data.get("image", "")
     snr_db = float(data.get("snr", 10.0))
     if not math.isfinite(snr_db):
@@ -86,46 +124,49 @@ def process_frame(data):
     # Stay inside the SNR range the model was trained on
     snr_db = min(max(snr_db, 0.0), 20.0)
     channel_type = data.get("channel", "rician")
-    if channel_type not in ['awgn', 'rician', 'rayleigh']:
+    if channel_type not in CHANNELS:
         channel_type = 'rician'
-    
+    digital_mode = data.get("digital", "fixed10")
+    if digital_mode not in DIGITAL_MODES:
+        digital_mode = 'fixed10'
+
     # Decode base64 image
     if base64_image.startswith("data:image"):
         base64_image = base64_image.split(",")[1]
-    
-    image_bytes = base64.b64decode(base64_image)
-    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    
-    # Convert to tensor and add batch dim
-    input_tensor = to_tensor(pil_image).unsqueeze(0).to(device)
-    
-    # Forward pass through Semantic JSCC with CSI
-    with torch.no_grad():
-        x_hat = model(input_tensor, snr_db=snr_db, channel_type=channel_type)
-    
-    # Reconstruct to base64
-    output_tensor = x_hat.squeeze(0).cpu()
-    output_pil = to_pil(output_tensor)
-    
-    buffer = io.BytesIO()
-    output_pil.save(buffer, format="JPEG", quality=85)
-    out_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    out_data_uri = f"data:image/jpeg;base64,{out_base64}"
-    return out_data_uri, snr_db
+    pil_image = Image.open(io.BytesIO(base64.b64decode(base64_image))).convert("RGB")
+    x = to_tensor(pil_image).unsqueeze(0)
+
+    digital_future = digital_pool.submit(
+        digital_transmit, x[0], model.config['num_symbols'], snr_db, channel_type,
+        design_snr_db=DIGITAL_MODES[digital_mode], mode='practical')
+
+    x_hat = run_jscc(x.to(device), snr_db, channel_type)
+    digital_img, digital_bytes = digital_future.result()
+
+    return {
+        "image_reconstructed": to_data_uri(x_hat[0]),
+        "image_digital": to_data_uri(digital_img),
+        "digital_bytes": digital_bytes,
+        "num_symbols": model.config['num_symbols'],
+        "snr": snr_db,
+        "server_ms": round((time.time() - t0) * 1000),
+    }
 
 
 # Mount the frontend directory to serve the UI directly
-from fastapi.staticfiles import StaticFiles
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", default=settings['checkpoint'])
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--no-fp16", action="store_true", help="Run the VAE in fp32")
     args = parser.parse_args()
+    settings['checkpoint'] = args.checkpoint
+    settings['fp16'] = not args.no_fp16
+
+    ssl_args = {}
     if os.path.exists("key.pem") and os.path.exists("cert.pem"):
-        print(f"Starting secure HTTPS server on port {args.port}...")
-        uvicorn.run("server:app", host="0.0.0.0", port=args.port, ssl_keyfile="key.pem", ssl_certfile="cert.pem")
-    else:
-        print(f"Starting insecure HTTP server on port {args.port}...")
-        uvicorn.run("server:app", host="0.0.0.0", port=args.port)
+        ssl_args = {"ssl_keyfile": "key.pem", "ssl_certfile": "cert.pem"}
+    print(f"Starting {'HTTPS' if ssl_args else 'HTTP'} server on port {args.port}...")
+    uvicorn.run(app, host="0.0.0.0", port=args.port, **ssl_args)

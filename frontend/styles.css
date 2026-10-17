@@ -162,8 +162,14 @@ input[type=range]::-webkit-slider-runnable-track {
 
 .video-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 2rem;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.5rem;
+}
+
+@media (max-width: 900px) {
+    .video-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .video-card {
@@ -201,6 +207,18 @@ input[type=range]::-webkit-slider-runnable-track {
     background: rgba(0, 242, 254, 0.2);
     color: var(--primary);
     border: 1px solid var(--primary);
+}
+
+.badge.digital {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.badge.digital.failed {
+    background: rgba(255, 80, 80, 0.2);
+    color: #ff8080;
+    border-color: #ff8080;
 }
 
 .video-wrapper {

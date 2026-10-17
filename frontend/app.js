@@ -10,6 +10,20 @@ const stopBtn = document.getElementById('stopBtn');
 const wsStatusDot = document.getElementById('wsStatusDot');
 const wsStatusText = document.getElementById('wsStatusText');
 const noiseOverlay = document.getElementById('noiseOverlay');
+const digitalVideo = document.getElementById('digitalVideo');
+const digitalBadge = document.getElementById('digitalBadge');
+const digitalSelect = document.getElementById('digitalSelect');
+const statsText = document.getElementById('statsText');
+
+// Frame-rate counter over a sliding one-second window
+let frameTimes = [];
+function updateStats(data) {
+    const now = performance.now();
+    frameTimes.push(now);
+    frameTimes = frameTimes.filter(t => now - t < 1000);
+    const k = data.num_symbols ? `K=${data.num_symbols} symbols | ` : '';
+    statsText.textContent = `${frameTimes.length} fps | ${k}server ${data.server_ms ?? '--'} ms`;
+}
 
 let stream;
 let ws;
@@ -73,6 +87,21 @@ function connectWebSocket() {
         if (data.image_reconstructed) {
             remoteVideo.src = data.image_reconstructed;
         }
+        if (data.image_digital) {
+            digitalVideo.src = data.image_digital;
+            if (data.digital_bytes > 0) {
+                digitalBadge.textContent = `DECODED ${data.digital_bytes} B`;
+                digitalBadge.classList.remove('failed');
+            } else {
+                digitalBadge.textContent = 'DECODING FAILED';
+                digitalBadge.classList.add('failed');
+            }
+        }
+        if (data.error) {
+            console.warn('Server frame error:', data.error);
+        } else {
+            updateStats(data);
+        }
         
         // Loop continuously to send the next frame as soon as the last one arrives
         if (isStreaming) {
@@ -102,7 +131,8 @@ function sendFrame() {
     ws.send(JSON.stringify({
         image: base64Image,
         snr: snrSlider.value,
-        channel: channelSelect ? channelSelect.value : 'rician'
+        channel: channelSelect ? channelSelect.value : 'rician',
+        digital: digitalSelect ? digitalSelect.value : 'fixed10'
     }));
 }
 
@@ -120,5 +150,7 @@ stopBtn.addEventListener('click', () => {
     stopWebcam();
     startBtn.disabled = false;
     remoteVideo.src = "";
+    digitalVideo.src = "";
+    statsText.textContent = '-- fps';
     noiseOverlay.style.opacity = '0';
 });

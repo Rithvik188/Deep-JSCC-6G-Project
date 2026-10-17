@@ -29,6 +29,13 @@
                     <input type="range" id="snrSlider" min="0" max="20" step="0.5" value="10.0">
                 </div>
                 <div class="control-group">
+                    <label for="digitalSelect">Digital Baseline:</label>
+                    <select id="digitalSelect" style="background: rgba(255,255,255,0.1); color: var(--text); border: 1px solid var(--glass-border); border-radius: 8px; padding: 0.5rem; font-family: 'Outfit', sans-serif;">
+                        <option value="fixed10" selected>Fixed rate (designed for 10 dB)</option>
+                        <option value="adaptive">Adaptive rate (ideal rate control)</option>
+                    </select>
+                </div>
+                <div class="control-group">
                     <button id="startBtn" class="btn primary">Start Stream</button>
                     <button id="stopBtn" class="btn secondary" disabled>Stop</button>
                 </div>
@@ -36,6 +43,7 @@
                     <span class="dot" id="wsStatusDot"></span>
                     <span id="wsStatusText">Disconnected</span>
                 </div>
+                <div class="status-indicator" id="statsText">-- fps</div>
             </div>
 
             <div class="video-grid">
@@ -58,6 +66,16 @@
                     <div class="video-wrapper">
                         <img id="remoteVideo" src="" alt="Waiting for stream...">
                         <div class="noise-overlay" id="noiseOverlay"></div>
+                    </div>
+                </div>
+
+                <div class="video-card glass">
+                    <div class="card-header">
+                        <h2>Digital: WebP + Channel Code</h2>
+                        <span class="badge digital" id="digitalBadge">SAME BANDWIDTH</span>
+                    </div>
+                    <div class="video-wrapper">
+                        <img id="digitalVideo" src="" alt="Waiting for stream...">
                     </div>
                 </div>
             </div>
