@@ -39,17 +39,15 @@ def get_latent_dataloaders(train_path: str, test_path: str, batch_size: int = 64
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
-        num_workers=2,
+        num_workers=0,     # latents are already in memory; workers only add overhead on Windows
         pin_memory=True,   # faster GPU transfer
-        persistent_workers=True,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
         drop_last=True,
-        num_workers=2,
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=True,
     )
     return train_loader, test_loader

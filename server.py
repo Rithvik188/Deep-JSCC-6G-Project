@@ -1,5 +1,6 @@
 import os
 import io
+import math
 import json
 import base64
 import torch
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import torchvision.transforms as transforms
 
-from models.jscc_system import DeepJSCCSystem
+from models.jscc_system import DeepJSCCSystem, load_jscc_weights
 
 app = FastAPI(title="Semantic Deep JSCC Backend")
 
@@ -41,25 +42,11 @@ async def startup_event():
     model = DeepJSCCSystem(use_vae=True).to(device)
     model.eval()
     
-    # Try to load weights if they exist
+    # Trained transmitter/receiver weights; the VAE keeps its pretrained weights.
+    # Fail loudly rather than silently streaming output from an untrained model.
     checkpoint_path = 'checkpoints/best_jscc_model.pth'
-    if not os.path.exists(checkpoint_path):
-        checkpoint_path = 'checkpoints/latest_jscc_model.pth'
-
-    if os.path.exists(checkpoint_path):
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            state_dict = checkpoint['model_state'] if (isinstance(checkpoint, dict) and 'model_state' in checkpoint) else checkpoint
-            # strict=False: ViT weights load; VAE weights stay at random init (VAE is frozen anyway)
-            missing, unexpected = model.load_state_dict(state_dict, strict=False)
-            loaded = len(state_dict) - len(missing)
-            print(f"Loaded trained weights from {checkpoint_path} ({loaded} keys matched).")
-            if missing:
-                print(f"  -> {len(missing)} keys not in checkpoint (VAE stays pretrained — OK).")
-        except Exception as e:
-            print(f"Warning: Could not load checkpoint: {e}. Using untrained initialization.")
-    else:
-        print("Warning: No trained weights found. Using untrained initialization.")
+    epoch = load_jscc_weights(model, checkpoint_path, device)
+    print(f"Loaded trained weights from {checkpoint_path} (epoch {epoch + 1}).")
 
 @app.websocket("/ws/stream")
 async def websocket_endpoint(websocket: WebSocket):
@@ -70,48 +57,62 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             # Receive JSON payload from client
             data_str = await websocket.receive_text()
-            data = json.loads(data_str)
-            
-            base64_image = data.get("image", "")
-            snr_db = float(data.get("snr", 10.0))
-            channel_type = data.get("channel", "rician")
-            if channel_type not in ['awgn', 'rician', 'rayleigh']:
-                channel_type = 'rician'
-            
-            # Decode base64 image
-            if base64_image.startswith("data:image"):
-                base64_image = base64_image.split(",")[1]
-            
-            image_bytes = base64.b64decode(base64_image)
-            pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            
-            # Convert to tensor and add batch dim
-            input_tensor = to_tensor(pil_image).unsqueeze(0).to(device)
-            
-            # Forward pass through Semantic JSCC with CSI
-            with torch.no_grad():
-                # returns (x_hat, s, y)
-                x_hat, _, _ = model(input_tensor, snr_db=snr_db, channel_type=channel_type)
-            
-            # Reconstruct to base64
-            output_tensor = x_hat.squeeze(0).cpu()
-            output_pil = to_pil(output_tensor)
-            
-            buffer = io.BytesIO()
-            output_pil.save(buffer, format="JPEG", quality=85)
-            out_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            out_data_uri = f"data:image/jpeg;base64,{out_base64}"
-            
+            try:
+                out_data_uri, snr_db = process_frame(json.loads(data_str))
+            except Exception as e:
+                # A bad frame should not kill the stream; reply so the client keeps looping
+                print(f"Frame error: {e}")
+                await websocket.send_json({"error": str(e)})
+                continue
+
             # Send back the reconstructed frame
             await websocket.send_json({
                 "image_reconstructed": out_data_uri,
                 "snr": snr_db
             })
-            
+
     except WebSocketDisconnect:
         print("Client disconnected.")
     except Exception as e:
         print(f"WebSocket error: {e}")
+
+
+def process_frame(data):
+    """Decodes one client frame, runs it through the JSCC pipeline, returns (jpeg data URI, snr)."""
+    base64_image = data.get("image", "")
+    snr_db = float(data.get("snr", 10.0))
+    if not math.isfinite(snr_db):
+        snr_db = 10.0
+    # Stay inside the SNR range the model was trained on
+    snr_db = min(max(snr_db, 0.0), 20.0)
+    channel_type = data.get("channel", "rician")
+    if channel_type not in ['awgn', 'rician', 'rayleigh']:
+        channel_type = 'rician'
+    
+    # Decode base64 image
+    if base64_image.startswith("data:image"):
+        base64_image = base64_image.split(",")[1]
+    
+    image_bytes = base64.b64decode(base64_image)
+    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    
+    # Convert to tensor and add batch dim
+    input_tensor = to_tensor(pil_image).unsqueeze(0).to(device)
+    
+    # Forward pass through Semantic JSCC with CSI
+    with torch.no_grad():
+        x_hat = model(input_tensor, snr_db=snr_db, channel_type=channel_type)
+    
+    # Reconstruct to base64
+    output_tensor = x_hat.squeeze(0).cpu()
+    output_pil = to_pil(output_tensor)
+    
+    buffer = io.BytesIO()
+    output_pil.save(buffer, format="JPEG", quality=85)
+    out_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    out_data_uri = f"data:image/jpeg;base64,{out_base64}"
+    return out_data_uri, snr_db
+
 
 # Mount the frontend directory to serve the UI directly
 from fastapi.staticfiles import StaticFiles

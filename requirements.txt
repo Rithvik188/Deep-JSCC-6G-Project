@@ -4,3 +4,9 @@ numpy
 matplotlib
 pytorch-msssim
 pytest
+diffusers
+transformers
+fastapi
+uvicorn
+pillow
+cryptography

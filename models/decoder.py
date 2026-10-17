@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from channel.fading import snr_to_noise_var
 
 class ViTReceiver(nn.Module):
     def __init__(self, img_size=32, patch_size=4, out_channels=3, embed_dim=128, depth=4, num_heads=4, num_symbols=256, use_sigmoid=True):
@@ -10,8 +11,10 @@ class ViTReceiver(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
         self.embed_dim = embed_dim
         
-        # Project received symbols (B, 2, num_symbols) and CSI (B, 2, num_symbols) -> total 4 * num_symbols
-        # If h is provided, input is (B, 4, num_symbols); otherwise fallback to zero CSI
+        # Input features per symbol (4 * num_symbols total):
+        #   MMSE-equalized symbol (real, imag), channel gain |h|^2, and SNR.
+        # Equalization is done explicitly because undoing fading needs a per-symbol
+        # complex division, which a dense layer over [y, h] cannot represent.
         self.input_proj = nn.Linear(4 * num_symbols, self.num_patches * embed_dim)
         
         # Positional Embedding
@@ -35,21 +38,31 @@ class ViTReceiver(nn.Module):
         if self.use_sigmoid:
             self.sigmoid = nn.Sigmoid()
 
-    def forward(self, y, h=None):
+    def forward(self, y, h=None, snr_db=10.0):
         # y: (Batch, 2, num_symbols), h: (Batch, 2, num_symbols)
+        # snr_db: float or per-sample tensor (Batch,), known at the receiver like the CSI
         batch_size = y.size(0)
-        
+        y_real, y_imag = y[:, 0, :], y[:, 1, :]
+
         if h is None:
             # Fallback for AWGN without explicit h: assume h = 1 + 0j
-            h_real = torch.ones_like(y[:, 0:1, :])
-            h_imag = torch.zeros_like(y[:, 1:2, :])
-            h = torch.cat([h_real, h_imag], dim=1)
-            
-        # Concatenate received symbols y and CSI h -> (Batch, 4, num_symbols)
-        yh = torch.cat([y, h], dim=1)
-        yh = yh.view(batch_size, -1)  # (Batch, 4 * num_symbols)
-        
-        x = self.input_proj(yh)  # (Batch, num_patches * embed_dim)
+            h_real = torch.ones_like(y_real)
+            h_imag = torch.zeros_like(y_imag)
+        else:
+            h_real, h_imag = h[:, 0, :], h[:, 1, :]
+
+        # Per-symbol MMSE equalization: x_eq = y * conj(h) / (|h|^2 + noise_var)
+        noise_var = snr_to_noise_var(snr_db, y_real)        # (Batch, 1)
+        gain = h_real ** 2 + h_imag ** 2                     # |h|^2
+        denom = gain + noise_var
+        x_eq_real = (y_real * h_real + y_imag * h_imag) / denom
+        x_eq_imag = (y_imag * h_real - y_real * h_imag) / denom
+        snr_feat = (-10.0 * torch.log10(noise_var) / 20.0).expand_as(gain)  # SNR scaled to ~[0, 1]
+
+        feats = torch.stack([x_eq_real, x_eq_imag, gain, snr_feat], dim=1)  # (Batch, 4, num_symbols)
+        feats = feats.view(batch_size, -1)  # (Batch, 4 * num_symbols)
+
+        x = self.input_proj(feats)  # (Batch, num_patches * embed_dim)
         x = x.view(batch_size, self.num_patches, self.embed_dim)  # (Batch, num_patches, embed_dim)
         
         # Add positional embedding

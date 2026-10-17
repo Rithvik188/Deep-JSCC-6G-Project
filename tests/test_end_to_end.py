@@ -1,45 +1,64 @@
 import torch
 import torch.nn.functional as F
 import pytest
-from models.jscc_system import DeepJSCCSystem
+from models.decoder import ViTReceiver
+from models.jscc_system import DeepJSCCSystem, load_jscc_weights, MODEL_VERSION
 
-def test_end_to_end_pipeline():
-    # Initialize system
-    system = DeepJSCCSystem()
-    
-    # Mock image batch
-    batch_size = 4
-    x = torch.randn(batch_size, 3, 32, 32)
-    
-    # Forward pass
-    x_hat, s, y = system(x, snr_db=10.0, channel_type='rayleigh')
-    
-    # Verify output shape
-    expected_shape = (batch_size, 3, 32, 32)
-    assert x_hat.shape == expected_shape, f"Expected shape {expected_shape}, got {x_hat.shape}"
-    
-    # Verify bounded [0, 1]
-    assert torch.all(x_hat >= 0.0) and torch.all(x_hat <= 1.0), "Output values are not in [0, 1] range"
-    
-    # Compute dummy loss
-    loss = F.mse_loss(x_hat, x)
-    
-    # Backward pass
-    loss.backward()
-    
-    # Check encoder gradients
-    encoder_grad = False
-    for param in system.transmitter.parameters():
-        if param.grad is not None and param.grad.abs().sum() > 0:
-            encoder_grad = True
-            break
-            
-    # Check decoder gradients
-    decoder_grad = False
-    for param in system.receiver.parameters():
-        if param.grad is not None and param.grad.abs().sum() > 0:
-            decoder_grad = True
-            break
-            
-    assert encoder_grad, "Encoder parameters did not receive gradients"
-    assert decoder_grad, "Decoder parameters did not receive gradients"
+
+def test_latent_pipeline_shapes_and_gradients():
+    # VAE-free system (same trainable weights as the full system)
+    system = DeepJSCCSystem(use_vae=False)
+    latents = torch.randn(4, 4, 16, 16)
+
+    for channel_type in ["awgn", "rician", "rayleigh"]:
+        system.zero_grad()
+        latents_hat = system.forward_latent(latents, snr_db=torch.tensor([0.0, 5.0, 10.0, 20.0]),
+                                            channel_type=channel_type)
+        assert latents_hat.shape == latents.shape
+
+        F.mse_loss(latents_hat, latents).backward()
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in system.transmitter.parameters()), \
+            "Transmitter parameters did not receive gradients"
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in system.receiver.parameters()), \
+            "Receiver parameters did not receive gradients"
+
+
+def test_receiver_equalizes_fading():
+    # With no noise and perfect CSI, the receiver's equalized features must equal the sent
+    # symbols for any fading draw, so the output cannot depend on h.
+    torch.manual_seed(0)
+    rx = ViTReceiver(img_size=16, patch_size=2, out_channels=4, use_sigmoid=False).eval()
+    s = torch.randn(2, 2, 256)
+    h1 = torch.randn(2, 2, 256)
+
+    def apply(h):
+        yr = h[:, 0] * s[:, 0] - h[:, 1] * s[:, 1]
+        yi = h[:, 0] * s[:, 1] + h[:, 1] * s[:, 0]
+        return torch.stack([yr, yi], dim=1)
+
+    with torch.no_grad():
+        # Equal |h| so the gain feature matches too; only the phase differs
+        h2 = h1.flip(1) * torch.tensor([1.0, -1.0]).view(1, 2, 1)
+        out1 = rx(apply(h1), h1, snr_db=200.0)
+        out2 = rx(apply(h2), h2, snr_db=200.0)
+    assert torch.allclose(out1, out2, atol=1e-4)
+
+
+def test_checkpoint_round_trip_and_version_check(tmp_path):
+    src = DeepJSCCSystem(use_vae=False)
+    path = tmp_path / "ckpt.pth"
+    torch.save({"model_state": src.state_dict(), "epoch": 3, "model_version": MODEL_VERSION}, path)
+
+    dst = DeepJSCCSystem(use_vae=False)
+    assert load_jscc_weights(dst, path, "cpu") == 3
+    for k, v in src.state_dict().items():
+        assert torch.equal(v, dst.state_dict()[k])
+
+    torch.save({"model_state": src.state_dict(), "epoch": 3}, path)  # old, unversioned checkpoint
+    with pytest.raises(RuntimeError, match="model version"):
+        load_jscc_weights(dst, path, "cpu")
+
+    bad = {k: v for k, v in src.state_dict().items() if not k.startswith("receiver.")}
+    torch.save({"model_state": bad, "epoch": 3, "model_version": MODEL_VERSION}, path)
+    with pytest.raises(RuntimeError, match="missing"):
+        load_jscc_weights(dst, path, "cpu")

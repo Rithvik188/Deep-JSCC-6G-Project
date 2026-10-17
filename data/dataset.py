@@ -2,11 +2,7 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
-import ssl
 import os
-
-# Bypass SSL verification issues
-ssl._create_default_https_context = ssl._create_unverified_context
 
 def get_face_dataloaders(batch_size=32, root='./data', img_size=128):
     """

@@ -6,10 +6,11 @@ class ChannelPowerConstraint(nn.Module):
         super().__init__()
 
     def forward(self, x):
-        # Average power of 1.0. x is (Batch, 2, num_symbols)
-        # Normalize per item in the batch.
-        rms = torch.sqrt(torch.mean(x**2, dim=(1, 2), keepdim=True))
-        return x / (rms + 1e-8)
+        # x is (Batch, 2, num_symbols): real/imag parts of complex symbols.
+        # Normalize per item so the average COMPLEX symbol power E|s|^2 = 1
+        # (i.e. 0.5 per real dimension), matching the channel's SNR definition.
+        power = torch.mean(x**2, dim=(1, 2), keepdim=True) * 2.0
+        return x / torch.sqrt(power + 1e-8)
 
 class ViTTransmitter(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_channels=3, embed_dim=128, depth=4, num_heads=4, num_symbols=256):
