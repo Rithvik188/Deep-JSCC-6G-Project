@@ -3,8 +3,11 @@ import torch.nn as nn
 from channel.fading import snr_to_noise_var
 
 class ViTReceiver(nn.Module):
-    def __init__(self, img_size=32, patch_size=4, out_channels=3, embed_dim=128, depth=4, num_heads=4, num_symbols=256, use_sigmoid=True):
+    def __init__(self, img_size=32, patch_size=4, out_channels=3, embed_dim=128, depth=4, num_heads=4, num_symbols=256, use_sigmoid=True, receiver_mode='mmse'):
         super().__init__()
+        if receiver_mode not in ('mmse', 'raw'):
+            raise ValueError(f"Unknown receiver_mode: {receiver_mode}")
+        self.receiver_mode = receiver_mode
         self.img_size = img_size
         self.patch_size = patch_size
         self.out_channels = out_channels
@@ -12,9 +15,11 @@ class ViTReceiver(nn.Module):
         self.embed_dim = embed_dim
         
         # Input features per symbol (4 * num_symbols total):
-        #   MMSE-equalized symbol (real, imag), channel gain |h|^2, and SNR.
-        # Equalization is done explicitly because undoing fading needs a per-symbol
-        # complex division, which a dense layer over [y, h] cannot represent.
+        #   'mmse': MMSE-equalized symbol (real, imag), channel gain |h|^2, and SNR.
+        #   'raw':  received y (real, imag) and CSI h (real, imag), concatenated.
+        # 'mmse' is the default: undoing fading needs a per-symbol complex division,
+        # which a dense layer over raw [y, h] cannot represent. 'raw' exists only
+        # for the ablation that demonstrates this.
         self.input_proj = nn.Linear(4 * num_symbols, self.num_patches * embed_dim)
         
         # Positional Embedding
@@ -51,6 +56,10 @@ class ViTReceiver(nn.Module):
         else:
             h_real, h_imag = h[:, 0, :], h[:, 1, :]
 
+        if self.receiver_mode == 'raw':
+            feats = torch.stack([y_real, y_imag, h_real, h_imag], dim=1)
+            return self._decode(feats.view(batch_size, -1))
+
         # Per-symbol MMSE equalization: x_eq = y * conj(h) / (|h|^2 + noise_var)
         noise_var = snr_to_noise_var(snr_db, y_real)        # (Batch, 1)
         gain = h_real ** 2 + h_imag ** 2                     # |h|^2
@@ -60,8 +69,10 @@ class ViTReceiver(nn.Module):
         snr_feat = (-10.0 * torch.log10(noise_var) / 20.0).expand_as(gain)  # SNR scaled to ~[0, 1]
 
         feats = torch.stack([x_eq_real, x_eq_imag, gain, snr_feat], dim=1)  # (Batch, 4, num_symbols)
-        feats = feats.view(batch_size, -1)  # (Batch, 4 * num_symbols)
+        return self._decode(feats.view(batch_size, -1))  # (Batch, 4 * num_symbols)
 
+    def _decode(self, feats):
+        batch_size = feats.size(0)
         x = self.input_proj(feats)  # (Batch, num_patches * embed_dim)
         x = x.view(batch_size, self.num_patches, self.embed_dim)  # (Batch, num_patches, embed_dim)
         

@@ -62,3 +62,18 @@ def test_checkpoint_round_trip_and_version_check(tmp_path):
     torch.save({"model_state": bad, "epoch": 3, "model_version": MODEL_VERSION}, path)
     with pytest.raises(RuntimeError, match="missing"):
         load_jscc_weights(dst, path, "cpu")
+
+
+def test_config_round_trip_and_mismatch(tmp_path):
+    from models.jscc_system import build_from_checkpoint
+    src = DeepJSCCSystem(use_vae=False, num_symbols=512, receiver_mode="raw")
+    path = tmp_path / "k512.pth"
+    torch.save({"model_state": src.state_dict(), "epoch": 1, "model_version": MODEL_VERSION,
+                "config": src.config}, path)
+
+    model, epoch = build_from_checkpoint(path, "cpu", use_vae=False)
+    assert epoch == 1 and model.config == src.config
+    assert model.forward_latent(torch.randn(2, 4, 16, 16), snr_db=10.0, channel_type="rayleigh").shape == (2, 4, 16, 16)
+
+    with pytest.raises(RuntimeError, match="trained with"):
+        load_jscc_weights(DeepJSCCSystem(use_vae=False), path, "cpu")  # default K=256 mmse model

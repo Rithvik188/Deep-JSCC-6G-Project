@@ -9,6 +9,10 @@ from channel.fading import WirelessChannel
 # v2: MMSE-equalized receiver input + unit complex symbol power.
 MODEL_VERSION = 2
 
+# Architecture settings stored in every checkpoint. Checkpoints without a config
+# (the first v2 run) were trained with exactly these defaults.
+DEFAULT_CONFIG = {'num_symbols': 256, 'receiver_mode': 'mmse', 'embed_dim': 128, 'depth': 4}
+
 
 class DeepJSCCSystem(nn.Module):
     """
@@ -18,15 +22,20 @@ class DeepJSCCSystem(nn.Module):
     pre-cached latents). The trainable weights and their state-dict keys are identical
     either way, so training checkpoints load straight into the full system.
     """
-    def __init__(self, use_vae=True):
+    def __init__(self, use_vae=True, num_symbols=256, receiver_mode='mmse', embed_dim=128, depth=4):
         super().__init__()
         self.use_vae = use_vae
+        self.config = {'num_symbols': num_symbols, 'receiver_mode': receiver_mode,
+                       'embed_dim': embed_dim, 'depth': depth}
         if self.use_vae:
             from models.vae import SemanticVAE  # diffusers import is slow; skip it when not needed
             self.vae = SemanticVAE()
         # VAE latents for a 128x128 image are 4x16x16
-        self.transmitter = ViTTransmitter(img_size=16, patch_size=2, in_channels=4)
-        self.receiver = ViTReceiver(img_size=16, patch_size=2, out_channels=4, use_sigmoid=False)
+        self.transmitter = ViTTransmitter(img_size=16, patch_size=2, in_channels=4, embed_dim=embed_dim,
+                                          depth=depth, num_symbols=num_symbols)
+        self.receiver = ViTReceiver(img_size=16, patch_size=2, out_channels=4, use_sigmoid=False,
+                                    embed_dim=embed_dim, depth=depth, num_symbols=num_symbols,
+                                    receiver_mode=receiver_mode)
         self.channel = WirelessChannel()
 
     def forward_latent(self, latents, snr_db=10.0, channel_type='rayleigh'):
@@ -42,6 +51,19 @@ class DeepJSCCSystem(nn.Module):
         return self.vae.decode(latents_hat)
 
 
+def read_checkpoint_config(checkpoint_path):
+    """Architecture config a checkpoint was trained with."""
+    ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+    return {**DEFAULT_CONFIG, **ckpt.get('config', {})}
+
+
+def build_from_checkpoint(checkpoint_path, device, use_vae=True):
+    """Builds the model variant a checkpoint was trained with and loads its weights."""
+    model = DeepJSCCSystem(use_vae=use_vae, **read_checkpoint_config(checkpoint_path)).to(device)
+    epoch = load_jscc_weights(model, checkpoint_path, device)
+    return model.eval(), epoch
+
+
 def load_jscc_weights(model, checkpoint_path, device):
     """
     Loads trained transmitter/receiver weights into `model` and fails loudly on any mismatch.
@@ -51,6 +73,9 @@ def load_jscc_weights(model, checkpoint_path, device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if not (isinstance(ckpt, dict) and 'model_state' in ckpt):
         raise RuntimeError(f"'{checkpoint_path}' is not a training checkpoint (no 'model_state').")
+    config = {**DEFAULT_CONFIG, **ckpt.get('config', {})}
+    if config != model.config:
+        raise RuntimeError(f"'{checkpoint_path}' was trained with {config}, but the model is {model.config}.")
     version = ckpt.get('model_version', 1)
     if version != MODEL_VERSION:
         raise RuntimeError(
