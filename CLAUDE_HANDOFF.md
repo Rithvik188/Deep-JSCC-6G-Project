@@ -1,4 +1,15 @@
 # Deep JSCC 6G Project — Complete AI Handoff Document
+
+> **UPDATE 2026-10-17 (Claude audit). Read this first; it supersedes the sections below where they conflict.**
+>
+> - **The original 30-epoch model did not work on Rayleigh.** Latent MSE was ~0.485 at every SNR from 0 to 40 dB, against 0.719 for just predicting the mean latent. AWGN was good (~0.07) and Rician had a floor (~0.135). Cause: the receiver fed raw `[y, h]` into a linear layer, which cannot do the per-symbol complex division needed to undo fading.
+> - **Fixed (MODEL_VERSION 2):** the receiver now MMSE-equalizes each symbol before the ViT, and is given the SNR (`receiver(y, h, snr_db)`). The power constraint now gives E|s|^2 = 1 per complex symbol; it was 2, which made every SNR label 3 dB optimistic. SNR is sampled per sample during training.
+> - **Old checkpoints are incompatible** and are refused on load (`load_jscc_weights` checks `model_version`). They were moved to `checkpoints/old_v1/`.
+> - **Training:** `python main.py` resumes from `checkpoints/latest_jscc_model.pth` (model + optimizer + scheduler state). Best = lowest mean val MSE over AWGN/Rician/Rayleigh at 10 dB.
+> - **Evaluation:** `python evaluate_visuals.py [--image-dir folder_of_photos]` writes PSNR/SSIM per channel × SNR on the official CIFAR-10 test split, a VAE-only ceiling, and grids to `results/`.
+> - **Tests:** `python -m pytest` (13 tests). `test_inference.py` and `quick_sanity_test.py` were removed (they were broken / didn't test the trained model).
+> - **Doc corrections:** installed PyTorch is 2.7.1+cu118 (not 2.13). There are no `__init__.py` files (namespace packages). Checkpoints contain only `transmitter.*` and `receiver.*`. Training images are CIFAR-10 32 px upsampled to 128 px, which is a domain gap vs. webcam frames. `DeepJSCCSystem(use_vae=False)` is now the training model (`LatentJSCC` is gone), and `model(x)` returns just `x_hat`.
+> - Git: repo at https://github.com/Rithvik188/Deep-JSCC-6G-Project. Data, checkpoints and TLS keys are gitignored.
 **For:** Claude (or any incoming AI agent)
 **From:** Antigravity (Google Deepmind AI, conversation ID: 4657c0a1-e9c0-43e5-bf69-986ca47a4e3f)
 **Date:** 2026-10-17
