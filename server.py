@@ -119,10 +119,13 @@ from fastapi.staticfiles import StaticFiles
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 if __name__ == "__main__":
-    import os
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
     if os.path.exists("key.pem") and os.path.exists("cert.pem"):
-        print("Starting secure HTTPS server...")
-        uvicorn.run("server:app", host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem", reload=True)
+        print(f"Starting secure HTTPS server on port {args.port}...")
+        uvicorn.run("server:app", host="0.0.0.0", port=args.port, ssl_keyfile="key.pem", ssl_certfile="cert.pem")
     else:
-        print("Starting insecure HTTP server...")
-        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+        print(f"Starting insecure HTTP server on port {args.port}...")
+        uvicorn.run("server:app", host="0.0.0.0", port=args.port)

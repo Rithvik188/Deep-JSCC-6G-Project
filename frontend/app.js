@@ -57,9 +57,9 @@ function stopWebcam() {
 }
 
 function connectWebSocket() {
-    // Connect to the FastAPI JSCC Server dynamically based on the current host IP
+    // Connect to the same server (host and port) that served this page
     const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-    ws = new WebSocket(protocol + window.location.hostname + ':8000/ws/stream');
+    ws = new WebSocket(protocol + window.location.host + '/ws/stream');
     
     ws.onopen = () => {
         wsStatusDot.classList.add('connected');
