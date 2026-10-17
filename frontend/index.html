@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>6G Semantic Video Conferencing</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=Outfit:wght@500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1 class="gradient-text">6G Semantic Telemetry</h1>
+            <p>Deep Joint Source-Channel Coding over Latent Space</p>
+        </header>
+
+        <main>
+            <div class="controls-panel glass">
+                <div class="control-group">
+                    <label for="channelSelect">Channel Model:</label>
+                    <select id="channelSelect" style="background: rgba(255,255,255,0.1); color: var(--text); border: 1px solid var(--glass-border); border-radius: 8px; padding: 0.5rem; font-family: 'Outfit', sans-serif;">
+                        <option value="rician" selected>Rician (6G LoS)</option>
+                        <option value="rayleigh">Rayleigh (6G NLoS)</option>
+                        <option value="awgn">AWGN (Baseline)</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="snrSlider">Signal Strength (SNR): <span id="snrValue">10.0</span> dB</label>
+                    <input type="range" id="snrSlider" min="0" max="20" step="0.5" value="10.0">
+                </div>
+                <div class="control-group">
+                    <button id="startBtn" class="btn primary">Start Stream</button>
+                    <button id="stopBtn" class="btn secondary" disabled>Stop</button>
+                </div>
+                <div class="status-indicator">
+                    <span class="dot" id="wsStatusDot"></span>
+                    <span id="wsStatusText">Disconnected</span>
+                </div>
+            </div>
+
+            <div class="video-grid">
+                <div class="video-card glass">
+                    <div class="card-header">
+                        <h2>Original Webcam (Input)</h2>
+                        <span class="badge raw">RAW</span>
+                    </div>
+                    <div class="video-wrapper">
+                        <video id="localVideo" autoplay playsinline muted></video>
+                        <canvas id="captureCanvas" style="display:none;"></canvas>
+                    </div>
+                </div>
+
+                <div class="video-card glass">
+                    <div class="card-header">
+                        <h2>Semantic JSCC (Reconstructed)</h2>
+                        <span class="badge jscc">AI DECODED</span>
+                    </div>
+                    <div class="video-wrapper">
+                        <img id="remoteVideo" src="" alt="Waiting for stream...">
+                        <div class="noise-overlay" id="noiseOverlay"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
