@@ -1,81 +1,122 @@
 """
 precompute_latents.py
 ---------------------
-ONE-TIME script. Encodes the entire CIFAR-10 dataset through the frozen
-Stable Diffusion VAE and saves the resulting latent tensors to disk.
+ONE-TIME script. Encodes a training image set through the frozen Stable Diffusion VAE and
+saves the resulting latent tensors to disk, so training never runs the VAE.
 
-After running this:
-  - data/latents_train.pt   (shape: [N_train, 4, 16, 16])
-  - data/latents_test.pt    (shape: [N_test,  4, 16, 16])
+Sources:
+  cifar  -> data/latents_train.pt, data/latents_test.pt
+            CIFAR-10 train split (32 px, upsampled to 128), random 80/20 split.
+  div2k  -> data/latents_div2k_train.pt, data/latents_div2k_test.pt
+            DIV2K train HR photos. Each image is resized to a random short side in
+            [128, 512] px and randomly cropped/flipped to 128x128, so crops range from whole
+            scenes to close-ups. Split by IMAGE (no test crop comes from a training image).
 
-Training then NEVER runs the VAE again, cutting epoch time from ~25 min
-down to ~2-3 min on an RTX 3060 — with zero change to model quality.
+Usage:
+  python precompute_latents.py --source div2k [--div2k-dir C:/Users/rithv/datasets/div2k/DIV2K_train_HR]
 """
 
 import os
+import argparse
+import random
 import torch
-from torch.utils.data import DataLoader
-from data.dataset import get_face_dataloaders
+import torchvision.transforms.functional as TF
+from PIL import Image
 from models.vae import SemanticVAE
 
 LATENT_DIR = "./data"
-TRAIN_OUT  = os.path.join(LATENT_DIR, "latents_train.pt")
-TEST_OUT   = os.path.join(LATENT_DIR, "latents_test.pt")
+DEFAULT_DIV2K_DIR = os.path.expanduser("~/datasets/div2k/DIV2K_train_HR")
+IMG_SIZE = 128
+SEED = 0
 
 
-def precompute_and_save():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Precompute] Using device: {device}")
+def output_paths(source):
+    prefix = "latents" if source == "cifar" else f"latents_{source}"
+    return (os.path.join(LATENT_DIR, f"{prefix}_train.pt"),
+            os.path.join(LATENT_DIR, f"{prefix}_test.pt"))
 
-    # ------------------------------------------------------------------ #
-    # Load raw image dataset (same pipeline as training)                   #
-    # ------------------------------------------------------------------ #
-    print("[Precompute] Loading image dataset...")
-    train_loader, test_loader = get_face_dataloaders(batch_size=64, img_size=128)
 
-    # ------------------------------------------------------------------ #
-    # Load frozen VAE (weights already frozen inside SemanticVAE)          #
-    # ------------------------------------------------------------------ #
-    print("[Precompute] Loading frozen VAE encoder...")
-    vae = SemanticVAE().to(device)
-    vae.eval()
+def random_crops(img, n, rng):
+    """n random 128x128 crops of a PIL image after random rescaling and horizontal flips."""
+    crops = []
+    for _ in range(n):
+        short_side = rng.randint(IMG_SIZE, 512)
+        scale = short_side / min(img.size)
+        resized = img.resize((max(IMG_SIZE, round(img.width * scale)),
+                              max(IMG_SIZE, round(img.height * scale))), Image.BICUBIC)
+        left = rng.randint(0, resized.width - IMG_SIZE)
+        top = rng.randint(0, resized.height - IMG_SIZE)
+        crop = resized.crop((left, top, left + IMG_SIZE, top + IMG_SIZE))
+        if rng.random() < 0.5:
+            crop = crop.transpose(Image.FLIP_LEFT_RIGHT)
+        crops.append(TF.to_tensor(crop))
+    return torch.stack(crops)
 
-    # ------------------------------------------------------------------ #
-    # Encode all training images                                           #
-    # ------------------------------------------------------------------ #
-    def encode_split(loader, split_name, out_path):
+
+@torch.no_grad()
+def encode_batches(vae, images, device, batch_size=50):
+    return torch.cat([vae.encode(images[i:i + batch_size].to(device)).cpu()
+                      for i in range(0, len(images), batch_size)])
+
+
+def precompute_div2k(vae, device, div2k_dir, crops_per_image=50, test_fraction=0.1):
+    files = sorted(f for f in os.listdir(div2k_dir) if f.lower().endswith(".png"))
+    if not files:
+        raise FileNotFoundError(f"No DIV2K PNGs found in {div2k_dir}")
+    rng = random.Random(SEED)
+    order = files[:]
+    rng.shuffle(order)
+    n_test = max(1, int(len(order) * test_fraction))
+    splits = {"test": order[:n_test], "train": order[n_test:]}
+
+    train_out, test_out = output_paths("div2k")
+    for split, out_path in [("train", train_out), ("test", test_out)]:
         if os.path.exists(out_path):
-            print(f"[Precompute] {out_path} already exists — skipping.")
-            return
+            print(f"[Precompute] {out_path} already exists - skipping.")
+            continue
+        latents = []
+        names = splits[split]
+        print(f"[Precompute] DIV2K {split}: {len(names)} images x {crops_per_image} crops", flush=True)
+        for i, name in enumerate(names):
+            img = Image.open(os.path.join(div2k_dir, name)).convert("RGB")
+            latents.append(encode_batches(vae, random_crops(img, crops_per_image, rng), device))
+            if (i + 1) % 20 == 0 or (i + 1) == len(names):
+                print(f"   -> Image [{i+1}/{len(names)}]", flush=True)
+        latents = torch.cat(latents)
+        torch.save(latents, out_path)
+        print(f"[Precompute] Saved {split}: shape={tuple(latents.shape)} -> {out_path}", flush=True)
 
-        all_latents = []
-        total_batches = len(loader)
-        print(f"[Precompute] Encoding {split_name} split ({total_batches} batches)...")
 
+def precompute_cifar(vae, device):
+    from data.dataset import get_face_dataloaders
+    torch.manual_seed(SEED)
+    train_loader, test_loader = get_face_dataloaders(batch_size=64, img_size=IMG_SIZE)
+    for loader, out_path in zip((train_loader, test_loader), output_paths("cifar")):
+        if os.path.exists(out_path):
+            print(f"[Precompute] {out_path} already exists - skipping.")
+            continue
         with torch.no_grad():
-            for i, batch in enumerate(loader):
-                if isinstance(batch, (list, tuple)):
-                    images = batch[0].to(device)
-                else:
-                    images = batch.to(device)
+            latents = torch.cat([vae.encode(images.to(device)).cpu() for images, _ in loader])
+        torch.save(latents, out_path)
+        print(f"[Precompute] Saved: shape={tuple(latents.shape)} -> {out_path}")
 
-                latents = vae.encode(images)          # (B, 4, 16, 16)
-                all_latents.append(latents.cpu())     # keep on CPU to save VRAM
 
-                if (i + 1) % 50 == 0 or (i + 1) == total_batches:
-                    print(f"   -> Batch [{i+1}/{total_batches}]", flush=True)
-
-        all_latents = torch.cat(all_latents, dim=0)   # (N, 4, 16, 16)
-        torch.save(all_latents, out_path)
-        size_mb = all_latents.element_size() * all_latents.nelement() / 1e6
-        print(f"[Precompute] Saved {split_name}: shape={tuple(all_latents.shape)}, "
-              f"size={size_mb:.1f} MB -> {out_path}")
-
-    encode_split(train_loader, "train", TRAIN_OUT)
-    encode_split(test_loader,  "test",  TEST_OUT)
-
-    print("[Precompute] Done! You can now run main.py to train at full speed.")
+def precompute_and_save(source="cifar", div2k_dir=DEFAULT_DIV2K_DIR):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Precompute] Source: {source} | device: {device}")
+    vae = SemanticVAE().to(device).eval()
+    if source == "div2k":
+        precompute_div2k(vae, device, div2k_dir)
+    elif source == "cifar":
+        precompute_cifar(vae, device)
+    else:
+        raise ValueError(f"Unknown source: {source}")
+    print("[Precompute] Done.")
 
 
 if __name__ == "__main__":
-    precompute_and_save()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", choices=["cifar", "div2k"], default="cifar")
+    parser.add_argument("--div2k-dir", default=DEFAULT_DIV2K_DIR)
+    args = parser.parse_args()
+    precompute_and_save(args.source, args.div2k_dir)
