@@ -144,10 +144,50 @@ def fig_system(out):
     plt.close(fig)
 
 
+def fig_system_compact(out):
+    """Two-row (snake) version of the pipeline for portrait documents: row 1 runs left to right,
+    row 2 right to left, so the text stays legible at page width."""
+    fig = plt.figure(figsize=(7.5, 4.3))
+    ax = fig.add_axes([0.0, 0.0, 1.0, 1.0])
+    ax.set_axis_off()
+    ax.set_xlim(0, 7.5)
+    ax.set_ylim(0, 4.3)
+    w, h = 2.1, 1.55
+    xs = [0.15, 2.7, 5.25]
+    y_top, y_bot = 2.55, 0.25
+    blocks = [  # (x, y, name, detail, trained) in signal order
+        (xs[0], y_top, 'Camera frame', '128x128 RGB', False),
+        (xs[1], y_top, 'VAE encoder', 'frozen SD-VAE\n-> 4x16x16 latent', False),
+        (xs[2], y_top, 'ViT transmitter', '-> K complex symbols,\nunit average power', True),
+        (xs[2], y_bot, 'Wireless channel', 'y = h·x + n\nAWGN, Rician or Rayleigh', False),
+        (xs[1], y_bot, 'MMSE equalizer\n+ ViT receiver', 'uses CSI h and SNR', True),
+        (xs[0], y_bot, 'VAE decoder', 'frozen\n-> 128x128 RGB', False),
+    ]
+    for x, y, name, detail, trained in blocks:
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0.02,rounding_size=0.1',
+                                    facecolor='#e8f1fc' if trained else '#f0efec',
+                                    edgecolor=BLUE if trained else AXIS, linewidth=1.2))
+        ax.text(x + w / 2, y + h - 0.42, name, ha='center', va='center', fontsize=11,
+                fontweight='semibold', color=INK, linespacing=1.1)
+        ax.text(x + w / 2, y + 0.42, detail, ha='center', va='center', fontsize=9.2, color=INK_2,
+                linespacing=1.3)
+    arrow = dict(arrowstyle='-|>', color=MUTED, lw=1.4, shrinkA=2, shrinkB=2)
+    for i in range(len(blocks) - 1):
+        (x0, y0), (x1, y1) = blocks[i][:2], blocks[i + 1][:2]
+        if y0 == y1 and x1 > x0:
+            ax.annotate('', xy=(x1, y1 + h / 2), xytext=(x0 + w, y0 + h / 2), arrowprops=arrow)
+        elif y0 == y1:
+            ax.annotate('', xy=(x1 + w, y1 + h / 2), xytext=(x0, y0 + h / 2), arrowprops=arrow)
+        else:
+            ax.annotate('', xy=(x1 + w / 2, y1 + h), xytext=(x0 + w / 2, y0), arrowprops=arrow)
+    fig.savefig(out, dpi=220)
+    plt.close(fig)
+
+
 # ------------------------------------------------------------------ fig 2: equalization ablation
-def fig_equalization(data, ceiling, out):
-    fig, ax = plt.subplots(figsize=(8, 4.8))
-    fig.subplots_adjust(top=0.80, right=0.80, left=0.09, bottom=0.13)
+def fig_equalization(data, ceiling, out, titled=True):
+    fig, ax = plt.subplots(figsize=(8, 4.8 if titled else 4.2))
+    fig.subplots_adjust(top=0.80 if titled else 0.97, right=0.80, left=0.09, bottom=0.13)
     xs, ys = series(data, 'k256', 'rayleigh')
     ax.plot(xs, ys, color=BLUE, label='MMSE equalization before the ViT (ours)', **LINE)
     end_label(ax, xs, ys, 'MMSE-equalized', BLUE)
@@ -157,17 +197,18 @@ def fig_equalization(data, ceiling, out):
     finish_axes(ax, (min(yr + ys) - 1.5, max(ys) + 1.5))
     ax.set_ylabel('PSNR (dB)')
     ax.legend(loc='upper left', fontsize=9.5)
-    title(fig, 'Explicit equalization makes Rayleigh fading learnable',
-          'Rayleigh fading, K = 256 symbols, Kodak test images. Same model, data and training; '
-          'only the receiver input differs.')
+    if titled:
+        title(fig, 'Explicit equalization makes Rayleigh fading learnable',
+              'Rayleigh fading, K = 256 symbols, Kodak test images. Same model, data and training; '
+              'only the receiver input differs.')
     fig.savefig(out, dpi=200)
     plt.close(fig)
 
 
 # ------------------------------------------------------------------ fig 3: bandwidth
-def fig_bandwidth(data, ceiling, out, channel='rayleigh'):
-    fig, ax = plt.subplots(figsize=(8, 4.8))
-    fig.subplots_adjust(top=0.80, right=0.80, left=0.09, bottom=0.13)
+def fig_bandwidth(data, ceiling, out, channel='rayleigh', titled=True):
+    fig, ax = plt.subplots(figsize=(8, 4.8 if titled else 4.2))
+    fig.subplots_adjust(top=0.80 if titled else 0.97, right=0.80, left=0.09, bottom=0.13)
     tags = {256: 'k256', 512: 'k512', 1024: 'k1024'}
     all_y = []
     for k, tag in tags.items():
@@ -182,8 +223,9 @@ def fig_bandwidth(data, ceiling, out, channel='rayleigh'):
     finish_axes(ax, (min(all_y) - 1.5, ceiling + 1.5))
     ax.set_ylabel('PSNR (dB)')
     ax.legend(loc='lower right', fontsize=9.5)
-    title(fig, 'More channel symbols per frame, sharper reconstructions',
-          f'{channel.capitalize()} fading, Kodak test images, models trained on CIFAR-10 latents.')
+    if titled:
+        title(fig, 'More channel symbols per frame, sharper reconstructions',
+              f'{channel.capitalize()} fading, Kodak test images, models trained on CIFAR-10 latents.')
     fig.savefig(out, dpi=200)
     plt.close(fig)
 
@@ -301,6 +343,12 @@ def main():
     data, ceiling = load_metrics(args.metrics)
     fig_equalization(data, ceiling, os.path.join(args.out, 'fig2_equalization.png'))
     fig_bandwidth(data, ceiling, os.path.join(args.out, 'fig3_bandwidth.png'))
+    # Document versions: no in-chart titles (the document's captions carry them), compact diagram
+    doc_dir = os.path.join(args.out, 'doc')
+    os.makedirs(doc_dir, exist_ok=True)
+    fig_system_compact(os.path.join(doc_dir, 'fig1_system.png'))
+    fig_equalization(data, ceiling, os.path.join(doc_dir, 'fig2_equalization.png'), titled=False)
+    fig_bandwidth(data, ceiling, os.path.join(doc_dir, 'fig3_bandwidth.png'), titled=False)
     fig_vs_digital(data, ceiling, os.path.join(args.out, 'fig4_vs_digital.png'))
     if not args.skip_visual:
         fig_visual(os.path.join(args.out, 'fig5_visual.png'), args.checkpoint, args.extra_image)
