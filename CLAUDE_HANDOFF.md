@@ -1,5 +1,18 @@
 # Deep JSCC 6G Project — Complete AI Handoff Document
 
+> **FINAL STATE (2026-10-26): project complete.** Team B-9: Rithvik Arulprakash, Harshith K V, Venugopalan G, Vipin Sudhakar.
+>
+> - **Final model:** `checkpoints/k1024_div2k_best.pth` (K=1024 symbols, MMSE receiver, trained on DIV2K crops). Other checkpoints: `best_jscc_model.pth` (K=256), `k512_best.pth`, `k1024_best.pth` (CIFAR), `k256_raw_best.pth` (raw-CSI ablation).
+> - **Results:** `results/kodak/metrics_kodak.csv` (5 models × 3 channels × 0–20 dB, plus ideal/practical/fixed digital baselines). VAE ceiling 26.9 dB. About 23 fps end to end.
+> - **Deliverables, all regenerable:**
+>   - `python report/make_figures.py` → `report/figures/{doc,slides,ieee}/` and `report/numbers.json`
+>   - `python report/build_slides.py` → `report/B9_Final_Review.pptx` (15 slides)
+>   - LaTeX in `report/ieee/` (pdflatex, bibtex, pdflatex ×2; MiKTeX installed) → `report/B9_IEEE_Report.pdf`
+>   - `python report/build_update_pdf.py` → the earlier progress update
+> - **Demo:** `python generate_cert.py <wifi-ip>` (pass the IP explicitly, since ProtonVPN can be picked up), then `python server.py --checkpoint checkpoints/k1024_div2k_best.pth --port 8001`.
+> - **Honest headline:** degrades gracefully and beats fixed-rate digital below its design SNR; adaptive digital wins by 2.5–3.3 dB at high SNR, because the VAE caps quality.
+> - The slide version of Fig. 5 contains a webcam frame of a team member's room, which is why generated images and decks are not committed.
+
 > **UPDATE 2026-10-17 (Claude audit). Read this first; it supersedes the sections below where they conflict.**
 >
 > - **The original 30-epoch model did not work on Rayleigh.** Latent MSE was ~0.485 at every SNR from 0 to 40 dB, against 0.719 for just predicting the mean latent. AWGN was good (~0.07) and Rician had a floor (~0.135). Cause: the receiver fed raw `[y, h]` into a linear layer, which cannot do the per-symbol complex division needed to undo fading.

@@ -1,0 +1,273 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{balance}
+\raggedbottom
+\graphicspath{{../figures/ieee/}{../figures/slides/}}
+
+\begin{document}
+
+\title{Semantic Deep Joint Source-Channel Coding\\over 6G Fading Channels}
+
+\author{
+\IEEEauthorblockN{Rithvik Arulprakash, Harshith K V, Venugopalan G, Vipin Sudhakar}
+\IEEEauthorblockA{Team B-9}
+}
+
+\maketitle
+
+\begin{abstract}
+Conventional wireless image transmission compresses an image into bits and then protects the bits with a channel code. This separate design works well at the signal-to-noise ratio (SNR) it is designed for, but it fails abruptly when the channel becomes worse (the \emph{cliff effect}) and does not improve when the channel becomes better. Deep joint source-channel coding (Deep JSCC) instead learns a direct mapping from images to channel symbols, so quality degrades gradually with the channel. We present a real-time semantic Deep JSCC system that transmits $128\times128$ camera frames over additive white Gaussian noise (AWGN), Rician (line-of-sight) and Rayleigh (non-line-of-sight) fading channels with a single trained model. Frames are compressed by a frozen pretrained variational autoencoder (VAE), and a vision-transformer (ViT) transmitter and receiver are trained end to end over randomly drawn channels and SNRs. We show that feeding raw received symbols and channel coefficients to the transformer receiver fails on Rayleigh fading, with quality almost constant at about 15.8\,dB PSNR from 0 to 20\,dB SNR, and that explicit per-symbol minimum mean-square-error (MMSE) equalization before the transformer fixes this, raising quality to 21.6\,dB at 20\,dB SNR. On the Kodak benchmark, quality improves steadily with channel bandwidth, and the system degrades gracefully where a digital link designed for 10\,dB fails completely. An adaptive practical digital link outperforms our system from about 2--4\,dB SNR upward, by 2.5--3.3\,dB at 20\,dB, because reconstruction quality is bounded by the VAE at 26.9\,dB. The complete pipeline runs at about 23 frames per second on a laptop GPU.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Deep joint source-channel coding, semantic communication, 6G, fading channels, vision transformer, channel equalization.
+\end{IEEEkeywords}
+
+% ======================================================================
+\section{Introduction}
+Shannon's separation theorem states that, for infinitely long blocks, compressing a source and then channel-coding the result is optimal~\cite{shannon1948}. Practical systems follow this design: an image codec produces a bit stream and a channel code with digital modulation transmits it. With finite block lengths and changing channels, the separate design has two practical weaknesses. If the channel is worse than the system was designed for, the channel code cannot be decoded and the receiver gets nothing usable; if it is better, the image quality stays the same because the bit rate was fixed in advance. This is the \emph{cliff effect}.
+
+Deep joint source-channel coding (Deep JSCC)~\cite{bourtsoulatze2019deep} replaces the codec, the channel code and the modulator with a single neural network that maps an image directly to channel symbols, and a second network that reconstructs the image from the noisy, faded symbols. Because the mapping is continuous, quality degrades gradually as the channel worsens. This property is attractive for 6G semantic communication, where links switch between line-of-sight (LoS) and non-line-of-sight (NLoS) conditions and must stay usable across a wide range of signal quality.
+
+This project builds and evaluates such a system for real-time camera frames. Our contributions are:
+\begin{itemize}
+\item A real-time semantic Deep JSCC system that operates in the latent space of a frozen pretrained VAE~\cite{rombach2022ldm}, with a ViT~\cite{dosovitskiy2021vit} transmitter and receiver trained once for AWGN, Rician and Rayleigh fading.
+\item A controlled ablation showing that a transformer receiver given the raw received symbols and channel coefficients cannot learn Rayleigh fading, and that explicit per-symbol MMSE equalization in front of the same receiver solves the problem at no extra parameter cost.
+\item A study of the trade-off between channel bandwidth and reconstruction quality, and of the effect of training on natural photographs.
+\item An evaluation on the Kodak benchmark against separate digital transmission at the same bandwidth, with an idealized capacity-achieving code, a practical set of modulation and coding rates, and a fixed-rate design. The evaluation shows where Deep JSCC degrades gracefully and where the digital link performs better.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:model} defines the system model, and Section~\ref{sec:system} describes the proposed system. Sections~\ref{sec:setup} and~\ref{sec:results} present the experimental setup and results, Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+% ======================================================================
+\section{Related Work}\label{sec:related}
+Bourtsoulatze \emph{et al.}~\cite{bourtsoulatze2019deep} introduced Deep JSCC for wireless image transmission with a convolutional autoencoder, showing graceful degradation over AWGN and slow fading channels compared with separate digital transmission. ADJSCC~\cite{xu2022adjscc} added attention modules conditioned on the SNR, so a single network covers a range of SNRs rather than one network per SNR. Transformer-based designs such as WITT~\cite{yang2023witt} and SwinJSCC~\cite{yang2023swinjscc} replace the convolutional backbone with vision transformers and adapt to the channel state. Deep JSCC has also been extended to video: DeepWiVe~\cite{tung2022deepwive} exploits temporal redundancy between frames and allocates bandwidth across frames. More recently, generative approaches such as DiffJSCC~\cite{yang2024diffjscc} use pretrained diffusion models to produce realistic reconstructions at low SNR, at the cost of many denoising steps per image.
+
+Our system differs in three ways. It works in the compact latent space of a frozen pretrained VAE, so only small transmitter and receiver networks are trained and training can run on a laptop GPU. It uses explicit MMSE equalization before the transformer receiver, which we show is essential for fast Rayleigh fading. And it runs in real time on live camera frames, with a digital baseline at the same bandwidth for comparison.
+
+% ======================================================================
+\section{System Model}\label{sec:model}
+The transmitter maps each frame to $K$ complex channel symbols $\mathbf{x}\in\mathbb{C}^K$, normalized to unit average power,
+\begin{equation}
+\frac{1}{K}\sum_{k=1}^{K}|x_k|^2 = 1.
+\end{equation}
+Each symbol passes through a flat-fading channel,
+\begin{equation}
+y_k = h_k x_k + n_k,\qquad n_k\sim\mathcal{CN}(0,\sigma^2),
+\label{eq:channel}
+\end{equation}
+so the SNR is $1/\sigma^2$. We consider three channel models, each with $\mathbb{E}|h_k|^2=1$:
+\begin{itemize}
+\item \textbf{AWGN}: $h_k=1$.
+\item \textbf{Rayleigh fading (NLoS)}: $h_k\sim\mathcal{CN}(0,1)$, a random phase and gain with no direct path.
+\item \textbf{Rician fading (LoS)}: $h_k=\sqrt{\tfrac{\kappa}{\kappa+1}}+\sqrt{\tfrac{1}{\kappa+1}}\,g_k$ with $g_k\sim\mathcal{CN}(0,1)$ and K-factor $\kappa=3$, i.e., a strong direct path plus scattering.
+\end{itemize}
+The fading coefficients are drawn independently for every symbol (fast fading), and the receiver is assumed to know $h_k$ and $\sigma^2$ (perfect channel-state information, CSI). The bandwidth ratio is the number of channel symbols per source value, $K/(128\cdot128\cdot3)$; for $K=256$, 512 and 1024 this is 1/192, 1/96 and 1/48.
+
+% ======================================================================
+\section{Proposed System}\label{sec:system}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{fig1_system.png}
+\caption{System pipeline. Grey blocks are the frozen, pretrained Stable Diffusion VAE; blue blocks are trained end to end over randomly drawn channel types and SNRs.}
+\label{fig:system}
+\end{figure*}
+
+Fig.~\ref{fig:system} shows the pipeline.
+
+\subsection{Semantic latent space}
+A $128\times128$ RGB frame is encoded by the frozen encoder of the Stable Diffusion VAE~\cite{rombach2022ldm} (the publicly released \texttt{sd-vae-ft-mse} weights) into a $4\times16\times16$ latent, 48 times fewer values than the image. We use the mode of the posterior, scaled by the VAE's standard latent scaling factor. The frozen VAE decoder turns the received latent back into an image. Only the transmitter and receiver are trained.
+
+\subsection{ViT transmitter}
+The latent is split into $2\times2$ patches, giving 64 tokens of dimension 128 with learned positional embeddings. A 4-layer transformer encoder~\cite{vaswani2017attention} (4 attention heads, feed-forward width 512, pre-normalization, GELU) processes the tokens. The output is flattened and projected linearly to $2K$ real values, interpreted as the real and imaginary parts of $K$ complex symbols. A power-normalization layer enforces unit average symbol power for every frame.
+
+\subsection{MMSE-equalized ViT receiver}
+For each received symbol, the receiver first computes the MMSE estimate
+\begin{equation}
+\hat{x}_k = \frac{h_k^*\,y_k}{|h_k|^2+\sigma^2}.
+\label{eq:mmse}
+\end{equation}
+The features $[\mathrm{Re}\,\hat{x}_k,\ \mathrm{Im}\,\hat{x}_k,\ |h_k|^2,\ \mathrm{SNR}]$ of all $K$ symbols are projected linearly to 64 tokens, processed by a second 4-layer transformer, and mapped by a linear head back to $2\times2$ latent patches. The gain $|h_k|^2$ and the SNR tell the network how reliable each equalized symbol is. For AWGN, (\ref{eq:mmse}) reduces to a constant scaling.
+
+The motivation for explicit equalization is that undoing fading requires a per-symbol division by $h_k$, a multiplicative operation. A receiver whose first layer is linear in the concatenated $[y_k, h_k]$ and mixes all symbols into tokens cannot represent this division, and the attention layers that follow only see mixed combinations of symbols. Section~\ref{sec:res_eq} confirms this experimentally.
+
+\subsection{Training}
+Because the VAE is frozen, the latents of all training images are computed once and cached, so training runs only the two transformers. Each batch uses a channel type drawn uniformly from AWGN, Rician and Rayleigh, and each sample in the batch an SNR drawn uniformly from 0 to 20\,dB, so one model learns all conditions. The loss is
+\begin{equation}
+\mathcal{L} = \|\hat{\mathbf{z}}-\mathbf{z}\|_2^2/N + 0.1\,\bigl(1-\cos(\hat{\mathbf{z}},\mathbf{z})\bigr),
+\end{equation}
+where $\mathbf{z}$ and $\hat{\mathbf{z}}$ are the original and reconstructed latents, $N$ their number of elements, and $\cos$ the cosine similarity. Table~\ref{tab:params} lists the main settings.
+
+\begin{table}[t]
+\centering
+\caption{Model and Training Settings}
+\label{tab:params}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Setting & Value \\
+\midrule
+Input / latent size & $128\times128\times3$ / $4\times16\times16$ \\
+Transformer (Tx and Rx) & 4 layers, 4 heads, width 128 \\
+Channel symbols $K$ & 256, 512, 1024 \\
+Trainable parameters & 14.2\,M / 26.8\,M / 51.9\,M \\
+Optimizer & AdamW~\cite{loshchilov2019adamw}, lr $3\times10^{-4}$, wd $10^{-4}$ \\
+Schedule & cosine decay to $10^{-5}$, 30 epochs \\
+Batch size & 64 \\
+Training SNR & uniform, 0--20\,dB per sample \\
+Checkpoint selection & mean latent MSE over 3 channels at 10\,dB \\
+Hardware & NVIDIA RTX 3060 Laptop GPU (6\,GB) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Real-time implementation}
+For live demonstration, a browser front end streams webcam frames over a WebSocket to a Python server, which runs the full pipeline (VAE encoder, transmitter, simulated channel, receiver and VAE decoder) and returns the reconstruction. The user selects the channel type and SNR, and a digital baseline at the same bandwidth (Section~\ref{sec:setup}) is shown alongside for comparison.
+
+% ======================================================================
+\section{Experimental Setup}\label{sec:setup}
+\subsection{Data}
+Models were trained on cached latents from two sources: CIFAR-10~\cite{krizhevsky2009cifar} training images upsampled to $128\times128$ (40\,000 training and 10\,000 validation latents), and DIV2K photographs~\cite{agustsson2017div2k}. For DIV2K, each of 720 training and 80 validation images was rescaled to a random short side between 128 and 512 pixels and cropped 50 times to $128\times128$ with random flips, giving 36\,000 and 4\,000 latents; the split is by image. All results are reported on the Kodak test set~\cite{kodak}: its 24 images were downscaled by a factor of two and cut into 144 non-overlapping $128\times128$ tiles. None of these images was used in training.
+
+\subsection{Metrics}
+We report PSNR and SSIM~\cite{wang2004ssim} in the image domain, averaged over the 144 tiles, for SNRs from 0 to 20\,dB in 2\,dB steps with a fixed random seed. The quality of the VAE alone, with no channel, is 26.9\,dB PSNR and 0.727 SSIM on these tiles. This is an upper bound for any scheme built on this autoencoder.
+
+\subsection{Digital baselines}
+The digital baselines compress each tile with WebP~\cite{webp} and send the bits over the same $K$ complex symbols. The encoder tries resolutions of 128, 96, 64, 48 and 32 pixels, upsampled bicubically at the receiver, and keeps the highest-PSNR version whose size fits the bit budget. Three channel-coding assumptions are used:
+\begin{itemize}
+\item \textbf{Ideal}: a capacity-achieving code with a budget of $K\cdot C$ bits, where $C=\log_2(1+\mathrm{SNR})$ for AWGN and the ergodic capacity $C=\mathbb{E}[\log_2(1+|h|^2\mathrm{SNR})]$ for fading. This is an optimistic upper bound for any digital scheme.
+\item \textbf{Practical (adaptive)}: the highest rate from the set $\{0.25, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5\}$ bits per symbol whose capacity requirement is met with a 2\,dB margin, re-chosen for each SNR. This approximates practical coded modulation.
+\item \textbf{Practical (fixed)}: the practical rate chosen for a design SNR of 10\,dB and kept fixed.
+\end{itemize}
+When the budget is too small for any image, or the actual SNR cannot support the chosen rate, decoding fails and the receiver displays a flat grey frame, which is included in the averages.
+
+% ======================================================================
+\section{Results}\label{sec:results}
+\subsection{Equalization makes Rayleigh fading learnable}\label{sec:res_eq}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig2_equalization.png}
+\caption{PSNR versus SNR on Rayleigh fading for two receivers with the same architecture, data and training ($K=256$, CIFAR-10 training, Kodak test). Only the receiver input differs.}
+\label{fig:eq}
+\end{figure}
+
+Fig.~\ref{fig:eq} compares two otherwise identical $K=256$ models. The model whose receiver takes the raw concatenation $[y_k, h_k]$ is almost insensitive to the SNR on Rayleigh fading: 15.2\,dB PSNR at 0\,dB and only 15.8\,dB at 20\,dB, so a hundredfold improvement in signal quality buys about half a decibel. With MMSE equalization, quality rises steadily from 17.6\,dB to 21.6\,dB, a gain of 5.7\,dB at 20\,dB. On AWGN the two receivers are close (21.6 and 21.9\,dB at 20\,dB), and on Rician fading the gap is 2.1\,dB (19.6 versus 21.7\,dB). This pattern matches the explanation in Section~\ref{sec:system}: the less the channel rotates the phase of each symbol, the less the missing per-symbol division matters.
+
+\subsection{Bandwidth and training data}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig3_bandwidth.png}
+\caption{PSNR versus SNR on Rayleigh fading for three bandwidths (CIFAR-10 training, Kodak test). The dotted line is the VAE-only ceiling.}
+\label{fig:bw}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{PSNR (dB) on Rayleigh Fading versus Bandwidth and Training Data (Kodak)}
+\label{tab:bw}
+\begin{tabular}{@{}llccc@{}}
+\toprule
+$K$ (ratio) & Training data & 0\,dB & 10\,dB & 20\,dB \\
+\midrule
+256 (1/192) & CIFAR-10 & 17.6 & 20.2 & 21.6 \\
+512 (1/96) & CIFAR-10 & 17.8 & 20.8 & 23.2 \\
+1024 (1/48) & CIFAR-10 & 18.6 & 22.1 & 24.6 \\
+1024 (1/48) & DIV2K & \textbf{19.9} & \textbf{23.4} & \textbf{25.6} \\
+\midrule
+VAE only & -- & 26.9 & 26.9 & 26.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Fig.~\ref{fig:bw} and Table~\ref{tab:bw} show that more bandwidth improves quality at every SNR, and that the gain grows with SNR. Going from 256 to 1024 symbols adds 1.0\,dB at 0\,dB SNR but 3.1\,dB at 20\,dB. At low SNR each symbol carries little information, so noise limits quality whatever the bandwidth; at high SNR each symbol can carry much more, and the number of symbols becomes the bottleneck. The $K=256$ curve flattens near 21.5\,dB for this reason.
+
+Training on natural photographs (DIV2K) instead of upsampled CIFAR-10 images improves the $K=1024$ model by 1.0 to 1.3\,dB at every SNR. CIFAR-10 images are $32\times32$ pixels, and upsampling them removes the fine detail that Kodak images and camera frames contain. We use the DIV2K-trained $K=1024$ model in the remaining experiments and in the live system.
+
+\subsection{Comparison with digital transmission}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{fig4_vs_digital.png}
+\caption{Deep JSCC versus digital transmission at the same bandwidth ($K=1024$ symbols per frame, Kodak). Practical digital curves are drawn as steps because rates change discretely. Failed digital frames count as flat grey. Dotted line: VAE-only ceiling.}
+\label{fig:digital}
+\end{figure*}
+
+\begin{table}[t]
+\centering
+\caption{PSNR (dB) / SSIM at $K=1024$ (Kodak)}
+\label{tab:digital}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Channel & Scheme & 0\,dB & 10\,dB & 20\,dB \\
+\midrule
+\multirow{4}{*}{AWGN} & Deep JSCC (ours) & 20.7/.540 & 24.8/.674 & 26.4/.717 \\
+ & Digital, fixed 10\,dB & fail & 26.4/.686 & 26.4/.686 \\
+ & Digital, adaptive & fail & 26.4/.686 & 28.9/.777 \\
+ & Digital, ideal & 23.3/.568 & 27.6/.728 & 30.0/.813 \\
+\midrule
+\multirow{4}{*}{Rician} & Deep JSCC (ours) & 20.2/.524 & 24.0/.650 & 26.1/.709 \\
+ & Digital, fixed 10\,dB & fail & 26.4/.686 & 26.4/.686 \\
+ & Digital, adaptive & fail & 26.4/.686 & 28.9/.777 \\
+ & Digital, ideal & 22.9/.556 & 27.3/.717 & 29.8/.806 \\
+\midrule
+\multirow{4}{*}{Rayleigh} & Deep JSCC (ours) & 19.9/.512 & 23.4/.627 & 25.6/.697 \\
+ & Digital, fixed 10\,dB & fail & 25.7/.658 & 25.7/.658 \\
+ & Digital, adaptive & fail & 25.7/.658 & 28.9/.777 \\
+ & Digital, ideal & 22.5/.544 & 26.9/.705 & 29.5/.798 \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+{\footnotesize ``fail'': decoding fails and a grey frame is shown (13.5--13.9\,dB PSNR).}
+\end{table}
+
+Fig.~\ref{fig:digital} and Table~\ref{tab:digital} compare the final model with the digital baselines. Three regimes stand out.
+
+\emph{Below the design SNR}, the fixed-rate digital link fails completely: between 0 and 8\,dB it delivers only grey frames, and above 10\,dB its quality stays constant. Deep JSCC improves continuously across the whole range, which is the graceful degradation that motivates JSCC.
+
+\emph{At 0\,dB}, even the adaptive practical link has too few bits to send any image and fails on every channel, while Deep JSCC still delivers 19.9 to 20.7\,dB.
+
+\emph{From about 2\,dB (AWGN) or 4\,dB (Rician and Rayleigh) upward}, the adaptive practical link is better than Deep JSCC, by 2.5--3.3\,dB PSNR at 20\,dB, and the idealized capacity-achieving link is better throughout. The main reason is the VAE ceiling of 26.9\,dB: the adaptive digital link exceeds this ceiling from 12--14\,dB upward, so no improvement to the JSCC networks alone could close the gap there. SSIM follows the same pattern.
+
+Across channel types, Deep JSCC loses only 0.8--1.4\,dB from AWGN to Rayleigh at every SNR, which confirms that the single model handles all three channel types.
+
+\subsection{Visual quality}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{fig5_visual.png}
+\caption{Reconstructions over Rayleigh fading at $K=1024$: Deep JSCC and practical adaptive digital transmission at 20, 10 and 0\,dB SNR.}
+\label{fig:visual}
+\end{figure*}
+
+Fig.~\ref{fig:visual} shows example reconstructions. At 20\,dB both schemes reproduce the images well, and the digital reconstructions are slightly sharper. At 10\,dB, Deep JSCC keeps fine structure such as the face paint and the parrots' feathers, while the digital reconstructions become blocky, although PSNR slightly favors digital there. At 0\,dB the Deep JSCC reconstructions are degraded but recognizable, and the digital link delivers nothing.
+
+\subsection{Real-time performance}
+On an RTX 3060 Laptop GPU, the complete pipeline (VAE encoding, transmitter, channel, receiver and VAE decoding) processes about 23 frames per second for single $128\times128$ frames with all three bandwidths. In the live demonstration the digital baseline is computed in parallel on the CPU.
+
+% ======================================================================
+\section{Discussion and Limitations}\label{sec:discussion}
+\textbf{VAE ceiling.} Working in the latent space of a frozen VAE makes training cheap and gives natural-looking reconstructions, but it caps quality at the VAE's own reconstruction quality (26.9\,dB on our test tiles). At high SNR this ceiling, not the channel, limits our system. Fine-tuning the VAE decoder for noisy latents, or using a higher-fidelity autoencoder, would raise it.
+
+\textbf{PSNR versus perception.} PSNR and SSIM measure pixel accuracy. At low SNR a decoder trained to minimize pixel error must output a blurred average of plausible images. A perceptual metric such as LPIPS, and a decoder trained for perceptual quality, would give a more complete picture.
+
+\textbf{Channel assumptions.} The channel is simulated, with perfect CSI at the receiver and fading drawn independently for every symbol. Real links have estimation errors and fading that is correlated in time and frequency. The independent-fading assumption is favorable to the digital baselines, whose ergodic capacity presumes ideal interleaving; with slow fading, a digital link also suffers outages. Evaluating both schemes under block fading and imperfect CSI is an important next step.
+
+\textbf{Resolution.} Frames are $128\times128$ pixels, which limits fine detail independently of the channel.
+
+% ======================================================================
+\section{Conclusion and Future Work}\label{sec:conclusion}
+We built a real-time semantic Deep JSCC system that transmits camera frames over AWGN, Rician and Rayleigh fading with a single trained model. Explicit per-symbol MMSE equalization in front of the transformer receiver is essential for Rayleigh fading, improving quality by 5.7\,dB at 20\,dB SNR over a receiver given the raw channel coefficients. Quality improves steadily with bandwidth and with training on natural photographs. Compared with digital transmission at the same bandwidth, the system degrades gracefully where a fixed-rate digital link fails and still delivers usable images at 0\,dB SNR, while an adaptive digital link is better at moderate and high SNR because our quality is bounded by the VAE.
+
+Future work includes a generative decoder for sharp reconstructions at low SNR, temporal conditioning to exploit redundancy between video frames, evaluation under block fading and imperfect channel estimates, and over-the-air experiments with software-defined radios.
+
+\balance
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

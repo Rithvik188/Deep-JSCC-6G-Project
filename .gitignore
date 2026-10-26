@@ -19,3 +19,11 @@ venv/
 
 # Logs
 *.log
+
+# LaTeX build files
+report/ieee/*.aux
+report/ieee/*.bbl
+report/ieee/*.blg
+report/ieee/*.log
+report/ieee/*.out
+report/ieee/main.pdf

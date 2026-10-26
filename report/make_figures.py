@@ -108,39 +108,47 @@ def finish_axes(ax, ylim):
 
 
 # ------------------------------------------------------------------ fig 1: system diagram
-def fig_system(out):
-    fig = plt.figure(figsize=(12, 3.4))
-    ax = fig.add_axes([0.0, 0.0, 1.0, 0.86])
+def fig_system(out, slide=False):
+    """Pipeline diagram. slide=True: larger type, no title or footnote (the slide carries them)."""
+    if slide:
+        fig = plt.figure(figsize=(12, 2.5))
+        ax = fig.add_axes([0.0, 0.0, 1.0, 1.0])
+        ax.set_ylim(0.6, 2.75)
+        xs, w, name_fs, detail_fs = [0.06 + 2.0 * i for i in range(6)], 1.88, 15, 12.5
+    else:
+        fig = plt.figure(figsize=(12, 3.4))
+        ax = fig.add_axes([0.0, 0.0, 1.0, 0.86])
+        ax.set_ylim(0, 2.9)
+        xs, w, name_fs, detail_fs = [0.15, 2.12, 4.09, 6.06, 8.03, 10.0], 1.8, 10.5, 8.8
     ax.set_axis_off()
     ax.set_xlim(0, 12)
-    ax.set_ylim(0, 2.9)
     blocks = [
-        (0.15, 'Camera\nframe', '128x128 RGB', False),
-        (2.12, 'VAE\nencoder', 'frozen SD-VAE\n-> 4x16x16 latent', False),
-        (4.09, 'ViT\ntransmitter', '-> K complex\nsymbols, unit power', True),
-        (6.06, 'Wireless\nchannel', 'y = h·x + n\nAWGN, Rician,\nor Rayleigh', False),
-        (8.03, 'MMSE equalizer\n+ ViT receiver', 'uses CSI h\nand SNR', True),
-        (10.0, 'VAE\ndecoder', 'frozen\n-> 128x128 RGB', False),
+        ('Camera\nframe', '128x128 RGB', False),
+        ('VAE\nencoder', 'frozen SD-VAE\n-> 4x16x16 latent', False),
+        ('ViT\ntransmitter', '-> K complex\nsymbols, unit power', True),
+        ('Wireless\nchannel', 'y = h·x + n\nAWGN, Rician,\nor Rayleigh', False),
+        ('MMSE equalizer\n+ ViT receiver', 'uses CSI h\nand SNR', True),
+        ('VAE\ndecoder', 'frozen\n-> 128x128 RGB', False),
     ]
-    w, h, y = 1.8, 1.95, 0.7
-    for x, name, detail, trained in blocks:
+    h, y = 1.95, 0.7
+    for x, (name, detail, trained) in zip(xs, blocks):
         face = '#e8f1fc' if trained else '#f0efec'
         edge = BLUE if trained else AXIS
         ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0.02,rounding_size=0.12',
                                     facecolor=face, edgecolor=edge, linewidth=1.2))
-        ax.text(x + w / 2, y + h - 0.45, name, ha='center', va='center', fontsize=10.5,
+        ax.text(x + w / 2, y + h - 0.45, name, ha='center', va='center', fontsize=name_fs,
                 fontweight='semibold', color=INK, linespacing=1.15)
-        ax.text(x + w / 2, y + 0.55, detail, ha='center', va='center', fontsize=8.8, color=INK_2,
+        ax.text(x + w / 2, y + 0.55, detail, ha='center', va='center', fontsize=detail_fs, color=INK_2,
                 linespacing=1.3)
     for i in range(len(blocks) - 1):
-        x0 = blocks[i][0] + w
-        ax.annotate('', xy=(blocks[i + 1][0], y + h / 2), xytext=(x0, y + h / 2),
-                    arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=1.4, shrinkA=2, shrinkB=2))
-    ax.text(0.15, 0.25, 'Blue = trained end-to-end over random channel types and SNRs (0-20 dB). '
-            'Grey = frozen pretrained Stable Diffusion VAE.', fontsize=9.5, color=INK_2)
-    fig.text(0.012, 0.96, 'Semantic Deep JSCC pipeline', ha='left', va='top', fontsize=15,
-             fontweight='semibold', color=INK)
-    fig.savefig(out, dpi=200, bbox_inches='tight')
+        ax.annotate('', xy=(xs[i + 1], y + h / 2), xytext=(xs[i] + w, y + h / 2),
+                    arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=1.4, shrinkA=1, shrinkB=1))
+    if not slide:
+        ax.text(0.15, 0.25, 'Blue = trained end-to-end over random channel types and SNRs (0-20 dB). '
+                'Grey = frozen pretrained Stable Diffusion VAE.', fontsize=9.5, color=INK_2)
+        fig.text(0.012, 0.96, 'Semantic Deep JSCC pipeline', ha='left', va='top', fontsize=15,
+                 fontweight='semibold', color=INK)
+    fig.savefig(out, dpi=200, bbox_inches=None if slide else 'tight')
     plt.close(fig)
 
 
@@ -185,9 +193,11 @@ def fig_system_compact(out):
 
 
 # ------------------------------------------------------------------ fig 2: equalization ablation
-def fig_equalization(data, ceiling, out, titled=True):
-    fig, ax = plt.subplots(figsize=(8, 4.8 if titled else 4.2))
-    fig.subplots_adjust(top=0.80 if titled else 0.97, right=0.80, left=0.09, bottom=0.13)
+def fig_equalization(data, ceiling, out, titled=True, figsize=None):
+    fig, ax = plt.subplots(figsize=figsize or (8, 4.8 if titled else 4.2))
+    small = figsize is not None and figsize[0] < 6  # report-column size: wider margins for labels
+    fig.subplots_adjust(top=0.80 if titled else 0.97, right=0.72 if small else 0.80,
+                        left=0.14 if small else 0.09, bottom=0.17 if small else 0.13)
     xs, ys = series(data, 'k256', 'rayleigh')
     ax.plot(xs, ys, color=BLUE, label='MMSE equalization before the ViT (ours)', **LINE)
     end_label(ax, xs, ys, 'MMSE-equalized', BLUE)
@@ -206,23 +216,29 @@ def fig_equalization(data, ceiling, out, titled=True):
 
 
 # ------------------------------------------------------------------ fig 3: bandwidth
-def fig_bandwidth(data, ceiling, out, channel='rayleigh', titled=True):
-    fig, ax = plt.subplots(figsize=(8, 4.8 if titled else 4.2))
-    fig.subplots_adjust(top=0.80 if titled else 0.97, right=0.80, left=0.09, bottom=0.13)
+def fig_bandwidth(data, ceiling, out, channel='rayleigh', titled=True, figsize=None):
+    fig, ax = plt.subplots(figsize=figsize or (8, 4.8 if titled else 4.2))
+    small = figsize is not None and figsize[0] < 6  # report-column size: wider margins for labels
+    fig.subplots_adjust(top=0.80 if titled else 0.97, right=0.72 if small else 0.80,
+                        left=0.14 if small else 0.09, bottom=0.17 if small else 0.13)
     tags = {256: 'k256', 512: 'k512', 1024: 'k1024'}
     all_y = []
     for k, tag in tags.items():
         xs, ys = series(data, tag, channel)
         all_y += ys
         ratio = 128 * 128 * 3 // k
-        ax.plot(xs, ys, color=RAMP[k], label=f'K = {k} symbols (1/{ratio} of pixel values)', **LINE)
+        label = f'K = {k} (1/{ratio} of pixels)' if small else f'K = {k} symbols (1/{ratio} of pixel values)'
+        ax.plot(xs, ys, color=RAMP[k], label=label, **LINE)
         end_label(ax, xs, ys, f'K = {k}', RAMP[k])
     ax.axhline(ceiling, color=REF_GRAY, linewidth=1.2, linestyle=(0, (2, 2)))
     ax.annotate('VAE-only ceiling (no channel)', xy=(0, ceiling), xytext=(2, 5), textcoords='offset points',
                 fontsize=9, color=MUTED)
     finish_axes(ax, (min(all_y) - 1.5, ceiling + 1.5))
     ax.set_ylabel('PSNR (dB)')
-    ax.legend(loc='lower right', fontsize=9.5)
+    if small:
+        ax.legend(loc='upper left', bbox_to_anchor=(0.0, 0.9), fontsize=8.5)
+    else:
+        ax.legend(loc='lower right', fontsize=9.5)
     if titled:
         title(fig, 'More channel symbols per frame, sharper reconstructions',
               f'{channel.capitalize()} fading, Kodak test images, models trained on CIFAR-10 latents.')
@@ -231,11 +247,13 @@ def fig_bandwidth(data, ceiling, out, channel='rayleigh', titled=True):
 
 
 # ------------------------------------------------------------------ fig 4: vs digital
-def fig_vs_digital(data, ceiling, out, jscc='k1024_div2k', design='10dB'):
+def fig_vs_digital(data, ceiling, out, jscc='k1024_div2k', design='10dB', titled=True, figsize=None):
     channels = ['awgn', 'rician', 'rayleigh']
     names = {'awgn': 'AWGN', 'rician': 'Rician (LoS)', 'rayleigh': 'Rayleigh (NLoS)'}
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4.9), sharey=True)
-    fig.subplots_adjust(top=0.72, left=0.06, right=0.99, bottom=0.14, wspace=0.08)
+    fig, axes = plt.subplots(1, 3, figsize=figsize or (13, 4.9 if titled else 4.3), sharey=True)
+    compact = figsize is not None and figsize[1] < 3.4
+    fig.subplots_adjust(top=0.72 if titled else (0.71 if compact else 0.80), left=0.07 if compact else 0.06,
+                        right=0.99, bottom=0.16 if compact else 0.14, wspace=0.08)
     all_y = []
     for ax, ch in zip(axes, channels):
         for method, color, label, kw in [
@@ -256,21 +274,23 @@ def fig_vs_digital(data, ceiling, out, jscc='k1024_div2k', design='10dB'):
         ax.set_title(names[ch], loc='left', fontsize=11.5, color=INK, pad=6)
         finish_axes(ax, (min(all_y) - 1.0, max(all_y + [ceiling]) + 1.0))
     axes[0].set_ylabel('PSNR (dB)')
-    axes[0].annotate('VAE ceiling', xy=(20, ceiling), xytext=(-2, 4), textcoords='offset points',
-                     ha='right', fontsize=8.5, color=MUTED)
+    axes[0].annotate('VAE ceiling', xy=(0, ceiling), xytext=(2, 4), textcoords='offset points',
+                     ha='left', fontsize=8.5, color=MUTED)
     handles, labels = axes[0].get_legend_handles_labels()
     order = [3, 2, 1, 0]
     fig.legend([handles[i] for i in order], [labels[i] for i in order], loc='upper left',
-               bbox_to_anchor=(0.055, 0.86), ncol=2, fontsize=9.5)
-    title(fig, 'Deep JSCC degrades gracefully; digital wins at high SNR but falls off a cliff below its design point',
-          'Same bandwidth for every scheme: K = 1024 complex channel symbols per 128x128 frame. '
-          'Kodak test images. Failed digital frames count as flat grey. Dotted line: VAE ceiling.')
+               bbox_to_anchor=(0.055, 0.86 if titled else 0.995), ncol=2, fontsize=9.5)
+    if titled:
+        title(fig, 'Deep JSCC degrades gracefully; digital wins at high SNR but falls off a cliff below its design point',
+              'Same bandwidth for every scheme: K = 1024 complex channel symbols per 128x128 frame. '
+              'Kodak test images. Failed digital frames count as flat grey. Dotted line: VAE ceiling.')
     fig.savefig(out, dpi=200)
     plt.close(fig)
 
 
 # ------------------------------------------------------------------ fig 5: visual comparison
-def fig_visual(out, checkpoint, extra_image=None, channel='rayleigh', snrs=(20, 10, 0)):
+def fig_visual(out, checkpoint, extra_image=None, channel='rayleigh', snrs=(20, 10, 0), titled=True,
+               label_fs=9.5):
     import torch
     import torchvision.transforms as T
     from PIL import Image
@@ -304,9 +324,10 @@ def fig_visual(out, checkpoint, extra_image=None, channel='rayleigh', snrs=(20, 
             tiles[('digital', s)] = torch.stack(dig)
 
     n_rows, n_cols = len(x), len(cols)
-    height = 1.75 * n_rows + 1.6
+    header = 1.6 if titled else 0.55
+    height = 1.75 * n_rows + header
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(1.75 * n_cols, height))
-    fig.subplots_adjust(top=1 - 1.5 / height, bottom=0.01, left=0.01, right=0.99,
+    fig.subplots_adjust(top=1 - (header - 0.1) / height, bottom=0.01, left=0.01, right=0.99,
                         wspace=0.04, hspace=0.04)
     for c, (label, key) in enumerate(cols):
         for r in range(n_rows):
@@ -318,15 +339,35 @@ def fig_visual(out, checkpoint, extra_image=None, channel='rayleigh', snrs=(20, 
                 sp.set_visible(False)
             if key and key[0] == 'digital' and (key[1], r) in failed:
                 ax.text(0.5, 0.5, 'decoding\nfailed', transform=ax.transAxes, ha='center', va='center',
-                        fontsize=9, color=INK_2)
+                        fontsize=label_fs - 0.5, color=INK_2)
             if r == 0:
-                ax.set_title(label, fontsize=9.5, color=INK, pad=4)
-    title(fig, f'Reconstructions over {channel.capitalize()} fading (K = {k} symbols)',
-          'Digital = WebP + practical channel code with rate adapted to the SNR, same bandwidth. '
-          'Bottom row: a real webcam frame from the live demo.',
-          y_main=1 - 0.15 / height, y_sub=1 - 0.55 / height)
+                ax.set_title(label, fontsize=label_fs, color=INK, pad=4)
+    if titled:
+        title(fig, f'Reconstructions over {channel.capitalize()} fading (K = {k} symbols)',
+              'Digital = WebP + practical channel code with rate adapted to the SNR, same bandwidth.'
+              + (' Bottom row: a real webcam frame from the live demo.' if extra_image else ''),
+              y_main=1 - 0.15 / height, y_sub=1 - 0.55 / height)
     fig.savefig(out, dpi=200)
     plt.close(fig)
+
+
+# ------------------------------------------------------------------ numbers for slides / report
+def export_numbers(data, ceiling, fps_log, out):
+    """Key values quoted in the slides and the report, all taken from the metrics CSV."""
+    import json
+    import re
+    psnr = {}
+    for (method, ch), pts in data.items():
+        psnr.setdefault(method, {})[ch] = {str(s): round(v, 2) for s, v in sorted(pts.items())}
+    fps = {}
+    if os.path.exists(fps_log):
+        for line in open(fps_log, encoding='utf-8', errors='ignore'):
+            m = re.match(r'\s+(\S+): ([\d.]+) fps', line)
+            if m:
+                fps[m.group(1)] = float(m.group(2))
+    with open(out, 'w') as f:
+        json.dump({'vae_ceiling_psnr': round(ceiling, 2), 'psnr': psnr, 'fps': fps,
+                   'dataset': 'Kodak, 144 tiles of 128x128 (images downscaled 2x)'}, f, indent=1)
 
 
 def main():
@@ -336,6 +377,7 @@ def main():
     parser.add_argument('--checkpoint', default='checkpoints/k1024_div2k_best.pth')
     parser.add_argument('--extra-image', default=None, help='Optional webcam frame for the visual grid')
     parser.add_argument('--skip-visual', action='store_true')
+    parser.add_argument('--fps-log', default='eval_kodak.log', help='evaluate_visuals.py log with fps lines')
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -350,8 +392,35 @@ def main():
     fig_equalization(data, ceiling, os.path.join(doc_dir, 'fig2_equalization.png'), titled=False)
     fig_bandwidth(data, ceiling, os.path.join(doc_dir, 'fig3_bandwidth.png'), titled=False)
     fig_vs_digital(data, ceiling, os.path.join(args.out, 'fig4_vs_digital.png'))
+    fig_vs_digital(data, ceiling, os.path.join(doc_dir, 'fig4_vs_digital.png'), titled=False)
+    # Slide versions: large-type pipeline; figure 5 reuses the titled grid with its header cropped
+    slide_dir = os.path.join(args.out, 'slides')
+    os.makedirs(slide_dir, exist_ok=True)
+    fig_system(os.path.join(slide_dir, 'fig1_system.png'), slide=True)
+    # Smaller canvases so the same point sizes read ~1.4x larger when the chart fills a slide
+    fig_equalization(data, ceiling, os.path.join(slide_dir, 'fig2_equalization.png'), titled=False,
+                     figsize=(5.8, 3.55))
+    fig_bandwidth(data, ceiling, os.path.join(slide_dir, 'fig3_bandwidth.png'), titled=False,
+                  figsize=(5.8, 3.55))
+    fig_vs_digital(data, ceiling, os.path.join(slide_dir, 'fig4_vs_digital.png'), titled=False,
+                   figsize=(9.6, 3.55))
+    export_numbers(data, ceiling, args.fps_log, os.path.join(os.path.dirname(args.out), 'numbers.json'))
+    # IEEE report versions, drawn near their printed size (column = 3.5 in, two columns = 7.16 in)
+    ieee_dir = os.path.join(args.out, 'ieee')
+    os.makedirs(ieee_dir, exist_ok=True)
+    fig_equalization(data, ceiling, os.path.join(ieee_dir, 'fig2_equalization.png'), titled=False,
+                     figsize=(4.4, 3.0))
+    fig_bandwidth(data, ceiling, os.path.join(ieee_dir, 'fig3_bandwidth.png'), titled=False, figsize=(4.4, 3.0))
+    fig_vs_digital(data, ceiling, os.path.join(ieee_dir, 'fig4_vs_digital.png'), titled=False,
+                   figsize=(8.4, 3.2))
     if not args.skip_visual:
-        fig_visual(os.path.join(args.out, 'fig5_visual.png'), args.checkpoint, args.extra_image)
+        fig_visual(os.path.join(doc_dir, 'fig5_visual.png'), args.checkpoint, titled=False)
+        fig_visual(os.path.join(ieee_dir, 'fig5_visual.png'), args.checkpoint, titled=False, label_fs=15)
+        # The slide version includes a webcam frame; only rebuild it when one is supplied,
+        # so a plain re-run never overwrites it with a Kodak-only grid.
+        slide_fig5 = os.path.join(args.out, 'fig5_visual.png')
+        if args.extra_image or not os.path.exists(slide_fig5):
+            fig_visual(slide_fig5, args.checkpoint, args.extra_image)
     print(f"Figures written to {args.out}/")
 
 
